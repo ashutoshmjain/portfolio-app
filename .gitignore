@@ -1,0 +1,7 @@
+holdings.yaml
+drift_log.csv
+prices_cache.json
+cost_basis.csv
+__pycache__/
+*.pyc
+.venv/
