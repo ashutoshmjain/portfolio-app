@@ -70,7 +70,8 @@ class App(ctk.CTk):
         self.data = None
         self.status_var = tk.StringVar(value="Ready — press Refresh prices.")
 
-        # ---- Top bar ----
+        # ---- Top bar (slim: actions live in the hamburger menu so a
+        # narrow split-screen window never chops them) ----
         top = ctk.CTkFrame(self)
         top.pack(fill="x", padx=10, pady=8)
         ctk.CTkLabel(top, text="PORTFOLIO DASHBOARD",
@@ -79,26 +80,21 @@ class App(ctk.CTk):
         self.date_lbl = ctk.CTkLabel(
             top, text="As of %s" % datetime.date.today().isoformat())
         self.date_lbl.pack(side="left", padx=8)
-        ctk.CTkLabel(top, text="Home (Zillow) $:").pack(side="left", padx=4)
-        self.home_entry = ctk.CTkEntry(top, width=120)
-        self.home_entry.insert(0, str(pc.HOME_DEFAULT))
-        self.home_entry.pack(side="left", padx=4)
-        ctk.CTkButton(top, text="Apply home",
-                      command=self.apply_home).pack(side="left", padx=4)
-        ctk.CTkButton(top, text="Refresh prices",
-                      command=self.refresh_async).pack(side="left", padx=4)
-        ctk.CTkButton(top, text="Log today's close",
-                      command=self.log_close).pack(side="left", padx=4)
+        ctk.CTkButton(top, text="☰", width=44,
+                      command=self.toggle_menu).pack(side="right", padx=4)
         self.status = ctk.CTkLabel(top, textvariable=self.status_var,
                                    text_color="orange")
         self.status.pack(side="left", padx=8)
+        self.menu_win = None
+        self.home_entry = None
 
         # ---- Tabs ----
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=4)
-        for name in ("Accounts", "Liquidity", "Diversification", "Rebalance",
-                     "Tax Harvest", "Real Estate", "Charts"):
+        for name in ("Charts", "Accounts", "Liquidity", "Diversification",
+                     "Rebalance", "Tax Harvest"):
             self.tabs.add(name)
+        self.tabs.set("Charts")
         self.frames = {}
 
         self.recompute()
@@ -108,17 +104,6 @@ class App(ctk.CTk):
     def recompute(self):
         self.data = pc.compute(self.positions, self.prices, self.home_value,
                                self.cost_basis)
-
-    def apply_home(self):
-        try:
-            self.home_value = float(self.home_entry.get().replace(",", "")
-                                    .replace("$", ""))
-        except ValueError:
-            self.status_var.set("Home value not a number — kept previous.")
-            return
-        self.recompute()
-        self.build_all()
-        self.status_var.set("Home updated to %s." % money(self.home_value))
 
     def refresh_async(self):
         self.status_var.set("Fetching prices from Yahoo Finance…")
@@ -157,6 +142,74 @@ class App(ctk.CTk):
         self.status_var.set(msg)
         self.build_charts()
 
+    # ---- hamburger menu ----
+    def toggle_menu(self):
+        """Open/close the ☰ popup holding all actions."""
+        if self.menu_win is not None and self.menu_win.winfo_exists():
+            self._close_menu()
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("Actions")
+        win.transient(self)
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.geometry("+%d+%d" % (self.winfo_x() + self.winfo_width() - 320,
+                                 self.winfo_y() + 60))
+        ctk.CTkLabel(win, text="Home (Zillow) $:").pack(
+            padx=12, pady=(12, 2), anchor="w")
+        self.home_entry = ctk.CTkEntry(win, width=200)
+        self.home_entry.insert(0, str(self.home_value))
+        self.home_entry.pack(padx=12, pady=2, anchor="w")
+        ctk.CTkButton(win, text="Apply home",
+                      command=self.apply_home_from_menu).pack(
+                          padx=12, pady=4, fill="x")
+        ctk.CTkButton(win, text="Refresh prices",
+                      command=self.refresh_from_menu).pack(
+                          padx=12, pady=4, fill="x")
+        ctk.CTkButton(win, text="Log today's close",
+                      command=self.log_from_menu).pack(
+                          padx=12, pady=(4, 12), fill="x")
+        self.menu_win = win
+        # CustomTkinter withdraws a new Toplevel on Windows while theming
+        # its titlebar; re-show ours once that settles.
+        win.after(50, self._show_menu)
+
+    def _show_menu(self):
+        if self.menu_win is not None and self.menu_win.winfo_exists():
+            self.menu_win.deiconify()
+            self.menu_win.lift()
+
+    def _close_menu(self):
+        if self.menu_win is not None and self.menu_win.winfo_exists():
+            self.menu_win.destroy()
+        self.menu_win = None
+
+    def apply_home(self):
+        if self.home_entry is None or not self.home_entry.winfo_exists():
+            self.status_var.set("Open the ☰ menu to set the home value.")
+            return
+        try:
+            self.home_value = float(self.home_entry.get().replace(",", "")
+                                    .replace("$", ""))
+        except ValueError:
+            self.status_var.set("Home value not a number — kept previous.")
+            return
+        self.recompute()
+        self.build_all()
+        self.status_var.set("Home updated to %s." % money(self.home_value))
+
+    def apply_home_from_menu(self):
+        self.apply_home()
+        self._close_menu()
+
+    def refresh_from_menu(self):
+        self._close_menu()
+        self.refresh_async()
+
+    def log_from_menu(self):
+        self._close_menu()
+        self.log_close()
+
     # ---- builders ----
     def _clear(self, tab):
         frame = self.tabs.tab(tab)
@@ -170,7 +223,6 @@ class App(ctk.CTk):
         self.build_diversification()
         self.build_rebalance()
         self.build_tax()
-        self.build_real_estate()
         self.build_charts()
 
     def build_accounts(self):
@@ -313,59 +365,6 @@ class App(ctk.CTk):
                     "harvest rankings. Do NOT invent basis. Wash-sale rule: "
                     "do not rebuy the same ticker within 30 days of a loss "
                     "sale.",
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
-
-    def build_real_estate(self):
-        f = self._clear("Real Estate")
-        ctk.CTkLabel(
-            f, text="VIEW 6 — REAL ESTATE DEAL: San Jose townhouse -> "
-                    "Mountain House home. Bought 7204 Clarendon St, San Jose "
-                    "95129 (townhouse, 3bd/2.5ba, 1,542 sqft) on 5/5/2010 for "
-                    "$695K; sold 5/1/2017 for $1,350K (+$655K / +94% in 7 "
-                    "yrs). Bonaventure bought 5/11/2017 for $599K cash.",
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
-        Table(f, ["Side", "Account", "$"],
-              [["Cr", "Sale: 7204 Clarendon St, San Jose", "$1,350,000"],
-               ["Dr", "Mortgage payoff ($426K actual)", "$426,000"],
-               ["Dr", "Closing costs (your estimate)", "$70,000"],
-               ["Dr", "Buy: 485 W Bonaventure Ave (cash)", "$599,000"],
-               ["Dr", "Vanguard investment (Jun 2017, actual)", "$255,000"],
-               ["Dr", "Residual (plug)", "$0"],
-               ["", "**BALANCE CHECK (must be $0)", "**$0"]],
-              ).pack(fill="both", padx=6, pady=6)
-        Table(f, ["The leak — Clarendon mortgage interest 2010-2017 (EST.)",
-                  "$"],
-              [["Gross gain on sale ($1,350K - $695K)", "$655,000"],
-               ["Mortgage interest 2010-2017 (EST. ~4.5% on ~$480K avg)",
-                "-$140,000"],
-               ["Closing costs", "-$70,000"],
-               ["**Net Clarendon profit (pre-tax)", "**$445,000"]],
-              ).pack(fill="both", padx=6, pady=6)
-        Table(f, ["The tax shield — Sec. 121 exclusion (2017)", "$"],
-              [["Gross capital gain", "$655,000"],
-               ["Sec. 121 exclusion (married joint, primary residence)",
-                "-$500,000"],
-               ["**Taxable gain", "**$155,000"],
-               ["Est. tax saved (~30% fed+CA+NIIT on the $500K shield)",
-                "$150,000"]],
-              ).pack(fill="both", padx=6, pady=6)
-        flip_net = self.home_value + 946721
-        keep_net = 1604800 - 300000
-        Table(f, ["Head-to-head — absolute $ gain from flipping (today)",
-                  "Flip: what you have", "Keep: had you continued"],
-              [["Home", money(self.home_value), "$1,604,800"],
-               ["Vanguard (actual: $255K 6/17 + $67.5K 6/22)", "$946,721",
-                "$0"],
-               ["Mortgage still owed (est.)", "$0", "-$300,000"],
-               ["**NET", "**" + money(flip_net), "**" + money(keep_net)],
-               ["**YOUR GAIN FROM FLIPPING",
-                "**" + money(flip_net - keep_net), ""]],
-              ).pack(fill="both", padx=6, pady=6)
-        ctk.CTkLabel(
-            f, text="Verdict: the flip made ~$495K in absolute dollars, and "
-                    "the Sec. 121 shield made $500K of the $655K gain "
-                    "tax-free in 2017 — selling while it was still your "
-                    "primary residence was itself a six-figure decision.",
             wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
 
     def build_charts(self):

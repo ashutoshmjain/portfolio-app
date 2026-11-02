@@ -12,10 +12,9 @@ Windows PC.
 - **Diversification** — vs the 15:15:35:15:20 standard over total net worth
 - **Rebalance** — the 4 Schwab Ashu IRA trades (display only, NEVER executes)
 - **Tax Harvest** — $15K Medi-Cal gains guardrail, $11,781 leeway
-- **Real Estate** — the Clarendon -> Bonaventure deal (Dr/Cr, tax shield,
-  head-to-head)
-- **Charts** — Target vs Actual allocation; Actual vs Standard daily close
-  with Y-axis $2M–$5M and $100K steps (the chart Google Sheets flattened)
+- **Charts** (leading tab) — Target vs Actual allocation; Actual vs
+  Standard daily close with Y-axis $2M–$5M and $100K steps (the chart
+  Google Sheets flattened)
 
 ## Windows setup
 
@@ -25,15 +24,16 @@ Windows PC.
    pip install -r requirements.txt
    python portfolio_app.py
    ```
-3. Press **Refresh prices** (Yahoo Finance). If the network fails, the app
-   shows last-known prices from `prices_cache.json` and never crashes.
+3. Open the ☰ menu (top right) and press **Refresh prices**
+   (Yahoo Finance). If the network fails, the app shows last-known
+   prices from `prices_cache.json` and never crashes.
 
 ## Daily use
 
 - **Edit holdings**: change `holdings.yaml` when you buy/sell, then Refresh.
   (Same file the Sheets dashboard used as its source of truth.)
-- **Home value**: type a new Zillow value in the top bar, press Apply home.
-- **Log today's close**: appends today's row to `drift_log.csv`
+- **Home value**: open the ☰ menu, type a new Zillow value, press Apply home.
+- **Log today's close** (☰ menu): appends today's row to `drift_log.csv`
   (skips weekends, like the old daily cron). Upserts if run twice.
 - **Cost basis**: fill `cost_basis.csv` (account,ticker,cost_per_share) to
   activate unrealized P&L and harvest rankings in Tax Harvest. Never invent
