@@ -11,10 +11,59 @@ Windows PC.
   $111,900/yr + SS = $11,837/mo all-in after 65)
 - **Diversification** — vs the 15:15:35:15:20 standard over total net worth
 - **Rebalance** — the 4 Schwab Ashu IRA trades (display only, NEVER executes)
-- **Tax Harvest** — $15K Medi-Cal gains guardrail, $11,781 leeway
+- **Tax Harvest** — per-lot unrealized P&L with Long/Short holding term,
+  realized gains from closed lots, $15K Medi-Cal gains guardrail + leeway
 - **Charts** (leading tab) — Target vs Actual allocation; Actual vs
   Standard daily close with Y-axis $2M–$5M and $100K steps (the chart
   Google Sheets flattened)
+
+## Data model — one row per lot
+
+All positions live in **`portfolio.csv`** (gitignored, never pushed):
+
+```
+bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sale_price_per_share
+```
+
+- **Open lot:** `sold_date` and `sale_price_per_share` blank. **Closed lot:**
+  both filled. Status is DERIVED from the dates — there is no status column.
+- **Partial sale = two rows** (closed sold quantity + open remainder); the
+  Sell action splits automatically, never by hand.
+- `account_type`: `Traditional IRA`, `Roth IRA`, `Taxable`, `HSA`, `Cash`.
+  Cash rows (`CASH_USD`, savings) need no cost or dates.
+- **Share edits are count CORRECTIONS, not sales** — no tax event. A sale
+  always records date and price.
+- Settings live in **`profile.json`** (gitignored): date of birth, monthly
+  Social Security (owner + spouse), other realized gains this year + source
+  note, and the sheet-ported spending base figures.
+
+## Manage data (☰ menu)
+
+No new tab — data work lives with the other routine actions. **Manage
+data** opens a full-size window with three sections:
+
+- **Coverage** — Bank → Account → position checklist (Shares ✓/✗, Cost
+  ✓/✗, Acquired ✓/✗) with an overall progress line. Taxable = REQUIRED,
+  IRA/Roth/HSA = OPTIONAL, Cash = complete. Per-account type dropdown to
+  correct the type, and per-account **Download template**.
+- **Template** — **Download full template** (header row only) or upload a
+  filled one. Uploads validate FIRST (bad numbers/dates, sold-without-price,
+  type conflicts) and change nothing on failure; on success they MERGE by
+  account+asset, leaving every other position untouched. Fill it yourself,
+  or paste broker screenshots into ChatGPT, Muse, Gemini, or any AI and ask
+  it to fill the template, then upload here.
+- **Profile** — date of birth, SS amounts, other gains + note. Shows live
+  spending capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.
+
+## Position lifecycle (Accounts tab buttons)
+
+- **Add position** — bank, account (existing or new + type), asset, shares,
+  optional cost + acquired date.
+- **Sell / Reduce** — quantity + date + price; auto-splits the lot.
+- **Close position** — sell-all; the row leaves holdings, enters realized
+  gains. **Reopen** clears the sold fields.
+- Selling without a cost on file records the gain as **unknown** — the app
+  never invents basis.
 
 ## Windows setup
 
@@ -30,14 +79,18 @@ Windows PC.
 
 ## Daily use
 
-- **Edit holdings**: change `holdings.yaml` when you buy/sell, then Refresh.
-  (Same file the Sheets dashboard used as its source of truth.)
+- **Buy/sell**: use the Accounts tab buttons (Add / Sell / Close), or fill
+  a template in the Data window and upload it. Then Refresh prices.
 - **Home value**: open the ☰ menu, type a new Zillow value, press Apply home.
 - **Log today's close** (☰ menu): appends today's row to `drift_log.csv`
   (skips weekends, like the old daily cron). Upserts if run twice.
-- **Cost basis**: fill `cost_basis.csv` (account,ticker,cost_per_share) to
-  activate unrealized P&L and harvest rankings in Tax Harvest. Never invent
-  basis — leave blank until you pull it from the broker.
+- **Cost basis**: fill cost + acquired date per lot (Data window or
+  template) to activate P&L, holding terms, and harvest rankings. Never
+  invent basis — leave blank until you pull it from the broker.
+- **Migration note (2026-11-02)**: `holdings.yaml` + `cost_basis.csv` were
+  replaced by `portfolio.csv` + `profile.json`. The old files sit in a
+  dated backup folder next to the app folder
+  (`portfolio-app-backup-20261102`); delete it after a few confident runs.
 - **Drift baseline**: the calendar-year baseline is Dec 30, 2025
   (liquid $3,595K, home $931K). Every January, update BASELINE_LIQUID /
   BASELINE_HOME and JAN1_PRICES in `portfolio_calc.py` from the new

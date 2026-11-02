@@ -2,8 +2,10 @@
 """Portfolio computation core — no GUI imports, headless-testable.
 
 Ports the math from ~/workspace/portfolio/build_dashboard.py (Google Sheets
-version) to local Python. Reads holdings.yaml, fetches prices via yfinance
-(with a last-known cache fallback), and computes all 6 views + drift.
+version) to local Python. Reads portfolio.csv lots (via positions_from_lots),
+fetches prices via yfinance (with a last-known cache fallback), and computes
+all views + drift. Legacy holdings.yaml / cost_basis.csv readers are kept
+for migration reference only.
 
 NEVER executes trades, NEVER touches Google Sheets, NEVER asks for passwords.
 """
@@ -489,3 +491,362 @@ def make_drift_chart(fig, log_rows):
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
     return ax
+
+
+# ================= unified lots model (portfolio.csv) =================
+LOT_FIELDS = ["bank", "account", "account_type", "asset", "shares",
+              "cost_per_share", "acquired_date", "sold_date",
+              "sale_price_per_share"]
+ACCOUNT_TYPES = ["Traditional IRA", "Roth IRA", "Taxable", "HSA", "Cash"]
+CASH_ASSET = "CASH_USD"
+
+# Lots needing neither cost nor dates (complete by nature).
+RETIREMENT_TYPES = {"Traditional IRA", "Roth IRA", "HSA"}
+
+
+def _fnum(x):
+    try:
+        return None if x is None or str(x).strip() == "" else float(x)
+    except (ValueError, TypeError):
+        return None
+
+
+def _s(x):
+    return "" if x is None else str(x).strip()
+
+
+def load_portfolio(path):
+    """Return [lot] in file order. Lot keys: bank, account, account_type,
+    asset, shares, cost, acquired, sold_date, sale_price. Missing file
+    (fresh clone — data files are gitignored) yields []."""
+    lots = []
+    if not os.path.exists(path):
+        return lots
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            lots.append({
+                "bank": _s(row.get("bank")),
+                "account": _s(row.get("account")),
+                "account_type": _s(row.get("account_type")),
+                "asset": _s(row.get("asset")),
+                "shares": _fnum(row.get("shares")),
+                "cost": _fnum(row.get("cost_per_share")),
+                "acquired": _s(row.get("acquired_date")),
+                "sold_date": _s(row.get("sold_date")),
+                "sale_price": _fnum(row.get("sale_price_per_share")),
+            })
+    return lots
+
+
+def save_portfolio(path, lots):
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=LOT_FIELDS)
+        w.writeheader()
+        for lot in lots:
+            w.writerow({
+                "bank": lot.get("bank", ""),
+                "account": lot.get("account", ""),
+                "account_type": lot.get("account_type", ""),
+                "asset": lot.get("asset", ""),
+                "shares": "" if lot.get("shares") is None else lot["shares"],
+                "cost_per_share": "" if lot.get("cost") is None else lot["cost"],
+                "acquired_date": lot.get("acquired", ""),
+                "sold_date": lot.get("sold_date", ""),
+                "sale_price_per_share": ""
+                if lot.get("sale_price") is None else lot["sale_price"],
+            })
+
+
+def lot_status(lot):
+    """DERIVED status — never stored. Open iff sold_date is blank."""
+    return "Closed" if lot.get("sold_date") else "Open"
+
+
+def open_lots(lots):
+    return [l for l in lots if lot_status(l) == "Open"]
+
+
+def closed_lots(lots):
+    return [l for l in lots if lot_status(l) == "Closed"]
+
+
+def is_cash_row(lot):
+    return lot.get("asset") == CASH_ASSET or lot.get("account_type") == "Cash"
+
+
+def positions_from_lots(lots):
+    """Aggregate OPEN lots by (account, asset) into the position shape the
+    existing views consume: [{account, ticker, qty, bucket}]."""
+    agg = {}
+    order = []
+    for lot in open_lots(lots):
+        key = (lot["account"], lot["asset"])
+        if key not in agg:
+            agg[key] = 0.0
+            order.append(key)
+        agg[key] += lot["shares"] or 0.0
+    positions = []
+    for account, asset in order:
+        positions.append({"account": account, "ticker": asset,
+                          "qty": agg[(account, asset)],
+                          "bucket": TICKER_BUCKET.get(asset, "Equities")})
+    return positions
+
+
+def cost_map_from_lots(lots):
+    """{(account, asset): share-weighted average cost} over open lots that
+    carry a cost. Used for the aggregate views; Tax Harvest uses per-lot
+    costs directly."""
+    tot_shares = {}
+    tot_cost = {}
+    for lot in open_lots(lots):
+        if lot.get("cost") is None or lot.get("shares") is None:
+            continue
+        key = (lot["account"], lot["asset"])
+        tot_shares[key] = tot_shares.get(key, 0.0) + lot["shares"]
+        tot_cost[key] = tot_cost.get(key, 0.0) + lot["shares"] * lot["cost"]
+    return {k: tot_cost[k] / tot_shares[k]
+            for k in tot_cost if tot_shares[k]}
+
+
+def holding_term(acquired, as_of=None, sold=None):
+    """Long if held more than a year, Short otherwise, None if no date.
+    `sold` (YYYY-MM-DD) is the end of the holding period when given."""
+    if not acquired:
+        return None
+    try:
+        start = datetime.date.fromisoformat(acquired)
+        end = datetime.date.fromisoformat(sold) if sold \
+            else (as_of or datetime.date.today())
+    except ValueError:
+        return None
+    return "Long" if (end - start).days > 365 else "Short"
+
+
+def realized_gains_year(lots, year, other=0.0):
+    """(total, unknown_count, rows) for lots closed in `year`. Rows with a
+    missing cost are EXCLUDED from the total and counted as unknown —
+    never invented."""
+    total = 0.0
+    unknown = 0
+    rows = []
+    for lot in closed_lots(lots):
+        if not lot.get("sold_date", "").startswith(str(year)):
+            continue
+        if lot.get("cost") is None or lot.get("sale_price") is None \
+                or lot.get("shares") is None:
+            unknown += 1
+            gain = None
+        else:
+            gain = (lot["sale_price"] - lot["cost"]) * lot["shares"]
+            total += gain
+        rows.append({"account": lot["account"], "asset": lot["asset"],
+                     "shares": lot["shares"], "cost": lot["cost"],
+                     "sale_price": lot["sale_price"],
+                     "sold_date": lot["sold_date"], "gain": gain,
+                     "term": holding_term(lot["acquired"],
+                                          sold=lot["sold_date"])})
+    return total + (other or 0.0), unknown, rows
+
+
+def coverage(lots):
+    """Coverage roll-ups. Cash rows need nothing, so they are excluded
+    from the cost/date denominators."""
+    banks = {}
+    for lot in open_lots(lots):
+        cash = is_cash_row(lot)
+        needs = not cash
+        pos = {"asset": lot["asset"],
+               "shares_ok": lot.get("shares") is not None,
+               "cost_ok": (not needs) or lot.get("cost") is not None,
+               "acq_ok": (not needs) or bool(lot.get("acquired"))}
+        bank = banks.setdefault(lot["bank"] or "?", {"accounts": {}})
+        acct = bank["accounts"].setdefault(
+            lot["account"], {"type": lot.get("account_type", ""),
+                             "positions": []})
+        acct["positions"].append(pos)
+    total = {"holdings_ok": 0, "holdings_n": 0, "cost_ok": 0, "cost_n": 0,
+             "acq_ok": 0, "acq_n": 0, "taxable_n": 0, "retire_n": 0}
+    for bank in banks.values():
+        for name, acct in bank["accounts"].items():
+            npos = len(acct["positions"])
+            acct["summary"] = {
+                "cost": "%d of %d cost" % (
+                    sum(p["cost_ok"] for p in acct["positions"]), npos),
+                "dates": "%d of %d dates" % (
+                    sum(p["acq_ok"] for p in acct["positions"]), npos)}
+            if acct["type"] == "Taxable":
+                acct["flag"] = "REQUIRED"
+            elif acct["type"] in RETIREMENT_TYPES:
+                acct["flag"] = "OPTIONAL"
+            else:
+                acct["flag"] = "COMPLETE"
+            for p in acct["positions"]:
+                if acct["type"] != "Cash":
+                    total["holdings_ok"] += p["shares_ok"]
+                    total["holdings_n"] += 1
+                if not _is_cash_pos(acct, p):
+                    total["cost_n"] += 1
+                    total["cost_ok"] += p["cost_ok"]
+                    total["acq_n"] += 1
+                    total["acq_ok"] += p["acq_ok"]
+                    if acct["type"] == "Taxable":
+                        total["taxable_n"] += 1
+                    elif acct["type"] in RETIREMENT_TYPES:
+                        total["retire_n"] += 1
+    return {"banks": banks, "total": total}
+
+
+def _is_cash_pos(acct, pos):
+    return pos["asset"] == CASH_ASSET or acct["type"] == "Cash"
+
+
+
+
+
+def validate_lot_rows(rows, existing=None, today=None):
+    """Validate uploaded template rows (raw CSV dicts). Returns [errors];
+    empty means safe to merge. Checks `existing` lots for type conflicts
+    but never mutates anything."""
+    today = today or datetime.date.today()
+    errors = []
+    known = set(LOT_FIELDS)
+    if rows and set(rows[0].keys()) - known:
+        errors.append("unknown columns: %s"
+                      % sorted(set(rows[0].keys()) - known))
+    types = {}
+    for lino, r in enumerate(rows, start=2):
+        acct = _s(r.get("account"))
+        if not acct or not _s(r.get("asset")):
+            errors.append("line %d: account and asset are required" % lino)
+        shares = _fnum(r.get("shares"))
+        if shares is None or shares <= 0:
+            errors.append("line %d: shares must be a positive number" % lino)
+        if _s(r.get("cost_per_share")) and _fnum(r.get("cost_per_share")) is None:
+            errors.append("line %d: cost_per_share must be numeric" % lino)
+        for field in ("acquired_date", "sold_date"):
+            if _s(r.get(field)):
+                try:
+                    datetime.date.fromisoformat(_s(r.get(field)))
+                except ValueError:
+                    errors.append("line %d: %s must be YYYY-MM-DD" % (lino, field))
+        if _s(r.get("sale_price_per_share")) and \
+                _fnum(r.get("sale_price_per_share")) is None:
+            errors.append("line %d: sale_price_per_share must be numeric"
+                          % lino)
+        if bool(_s(r.get("sold_date"))) != bool(_s(r.get("sale_price_per_share"))):
+            errors.append("line %d: sold_date and sale_price_per_share go "
+                          "together" % lino)
+        if _s(r.get("acquired_date")) and _s(r.get("sold_date")) and \
+                _s(r.get("sold_date")) < _s(r.get("acquired_date")):
+            errors.append("line %d: sold_date precedes acquired_date" % lino)
+        if _s(r.get("acquired_date")) > today.isoformat():
+            errors.append("line %d: acquired_date is in the future" % lino)
+        atype = _s(r.get("account_type"))
+        if atype and atype not in ACCOUNT_TYPES:
+            errors.append("line %d: account_type must be one of %s"
+                          % (lino, ", ".join(ACCOUNT_TYPES)))
+        if acct and atype:
+            types.setdefault(acct, set()).add(atype)
+    for acct, ts in types.items():
+        if len(ts) > 1:
+            errors.append("account %r has conflicting types in upload: %s"
+                          % (acct, sorted(ts)))
+    if existing:
+        known_types = {}
+        for lot in existing:
+            if lot.get("account_type"):
+                known_types.setdefault(lot["account"], set()).add(
+                    lot["account_type"])
+        for acct, ts in types.items():
+            if acct in known_types and not ts <= known_types[acct]:
+                errors.append("account %r type %s conflicts with stored %s"
+                              % (acct, sorted(ts),
+                                 sorted(known_types[acct])))
+    return errors
+
+
+def merge_lots(existing, uploaded_rows):
+    """Merge validated upload rows into existing lots. Rows are keyed by
+    (account, asset): any uploaded key REPLACES that position's stored rows
+    (so re-uploading an account's template just works, including splits);
+    every other position is left untouched. Never replaces the whole file."""
+    keys = {(_s(r.get("account")), _s(r.get("asset"))) for r in uploaded_rows}
+    merged = [l for l in existing
+              if (l.get("account"), l.get("asset")) not in keys]
+    for r in uploaded_rows:
+        merged.append({
+            "bank": _s(r.get("bank")),
+            "account": _s(r.get("account")),
+            "account_type": _s(r.get("account_type")),
+            "asset": _s(r.get("asset")),
+            "shares": _fnum(r.get("shares")),
+            "cost": _fnum(r.get("cost_per_share")),
+            "acquired": _s(r.get("acquired_date")),
+            "sold_date": _s(r.get("sold_date")),
+            "sale_price": _fnum(r.get("sale_price_per_share")),
+        })
+    return merged
+
+
+def split_for_sale(lot, qty, sold_date, sale_price, cost=None):
+    """Auto-split an open lot for a partial sale: returns (closed_row,
+    open_row). Full-quantity sales just fill the dates (see Close)."""
+    if cost is not None:
+        lot = dict(lot, cost=cost)
+    closed = dict(lot, shares=qty, sold_date=sold_date, sale_price=sale_price)
+    open_row = dict(lot, shares=(lot["shares"] or 0.0) - qty,
+                    sold_date="", sale_price=None)
+    return closed, open_row
+
+
+# ================= profile (profile.json) =================
+PROFILE_DEFAULTS = {
+    "date_of_birth": "1968-08",
+    "ss_owner_monthly": 1812,
+    "ss_spouse_monthly": 700,
+    "other_realized_gains_current_year": 3219.16,
+    "other_realized_gains_note":
+        "Schwab Living Trust 2026 YTD (pre-app history)",
+    # Sheet-ported annual spending figures (user-confirmed constants, like
+    # the TLH cap below); after-65 all-in adds Social Security live.
+    "spending_before65_annual": 135545,
+    "spending_after65_base_annual": 111900,
+}
+
+
+def load_profile(path):
+    prof = dict(PROFILE_DEFAULTS)
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                prof.update(json.load(f))
+        except (ValueError, OSError):
+            pass
+    return prof
+
+
+def save_profile(path, prof):
+    with open(path, "w") as f:
+        json.dump(prof, f, indent=1, sort_keys=True)
+
+
+def spending_capacity(prof, today=None):
+    """Live spending figures from the profile. Base annuals are the
+    sheet-ported constants; after-65 all-in adds both SS checks monthly."""
+    today = today or datetime.date.today()
+    dob = str(prof.get("date_of_birth", ""))[:7]
+    try:
+        y, m = int(dob[:4]), int(dob[5:7])
+        turns65 = datetime.date(y + 65, m, 1).strftime("%b %Y")
+        age = today.year - y - ((today.month, today.day) < (m, 1))
+        months_left = max((y + 65 - today.year) * 12 + (m - today.month), 0)
+    except (ValueError, TypeError):
+        turns65, age, months_left = "--", None, None
+    before = float(prof.get("spending_before65_annual", 0) or 0)
+    base = float(prof.get("spending_after65_base_annual", 0) or 0)
+    ss = 12 * (float(prof.get("ss_owner_monthly", 0) or 0)
+               + float(prof.get("ss_spouse_monthly", 0) or 0))
+    return {"before65": before, "after65_base": base,
+            "after65_allin": base + ss, "turns65": turns65, "age": age,
+            "months_to_65": months_left}
