@@ -894,6 +894,10 @@ def drawdown_amounts(merged, needs, exclude_keys=()):
     for (acct, asset), qty in needs.items():
         if qty <= 1e-9:
             continue
+        pre = [l for l in merged if l.get("account") == acct
+               and l.get("asset") == asset and lot_key(l) not in excluded]
+        if not pre:
+            continue  # genuinely new position — no balance to draw from
         pool = [l for l in merged
                 if lot_status(l) == "Open" and not l.get("acquired")
                 and l.get("asset") == asset and l.get("account") == acct
@@ -942,6 +946,68 @@ def split_for_sale(lot, qty, sold_date, sale_price, cost=None):
     open_row = dict(lot, shares=(lot["shares"] or 0.0) - qty,
                     sold_date="", sale_price=None)
     return closed, open_row
+
+
+def account_values(lots, prices):
+    """{(bank, account): liquid value} over OPEN lots (CASH_USD at $1).
+    Missing prices are skipped (never crash on price failure)."""
+    vals = {}
+    for lot in open_lots(lots):
+        price = 1.0 if lot.get("asset") == CASH_ASSET \
+            else prices.get(lot.get("asset"))
+        if price is None or lot.get("shares") is None:
+            continue
+        key = (lot.get("bank") or "?", lot.get("account"))
+        vals[key] = vals.get(key, 0.0) + lot["shares"] * price
+    return vals
+
+
+def holdings_by_asset(lots, prices, home_value, home_cost=None):
+    """One row per asset aggregated across accounts (open lots only;
+    CASH_USD excluded — cash lives in Liquidity). Avg cost covers KNOWN-cost
+    lots only; unknown-cost shares are counted in `missing` and never
+    averaged in. Gain is computed on the known portion only. Home is one
+    more row (cost = purchase price if known, else value only, no gain).
+    Returns ([rows], total_value) sorted by value desc; each row carries
+    per-account lot detail for expansion."""
+    agg = {}
+    for lot in open_lots(lots):
+        if lot.get("asset") == CASH_ASSET:
+            continue
+        a = agg.setdefault(lot["asset"], {"shares": 0.0, "known_sh": 0.0,
+                                          "known_cost": 0.0, "by_acct": {}})
+        sh = lot.get("shares") or 0.0
+        a["shares"] += sh
+        if lot.get("cost") is not None:
+            a["known_sh"] += sh
+            a["known_cost"] += sh * lot["cost"]
+        a["by_acct"].setdefault(lot.get("account"), []).append(lot)
+    rows = []
+    for asset, a in agg.items():
+        price = prices.get(asset)
+        value = None if price is None else a["shares"] * price
+        avg = a["known_cost"] / a["known_sh"] if a["known_sh"] else None
+        if price is not None and avg is not None:
+            gain = a["known_sh"] * (price - avg)
+            gain_pct = gain / a["known_cost"] if a["known_cost"] else None
+        else:
+            gain, gain_pct = None, None
+        rows.append({"asset": asset, "shares": a["shares"],
+                     "missing": a["shares"] - a["known_sh"],
+                     "avg_cost": avg, "price": price, "value": value,
+                     "gain": gain, "gain_pct": gain_pct,
+                     "by_acct": a["by_acct"]})
+    rows.append({"asset": "Home (real estate)", "shares": 1.0, "missing": 0.0,
+                 "avg_cost": home_cost, "price": home_value,
+                 "value": home_value,
+                 "gain": None if home_cost is None
+                 else home_value - home_cost,
+                 "gain_pct": None if not home_cost
+                 else (home_value - home_cost) / home_cost,
+                 "by_acct": {}})
+    rows.sort(key=lambda r: (r["value"] is None, -(r["value"] or 0)))
+    total = sum(r["value"] for r in rows if r["value"] is not None)
+    return rows, total
 
 
 def fifo_order(lots):
@@ -1002,6 +1068,8 @@ PROFILE_DEFAULTS = {
     # the TLH cap below); after-65 all-in adds Social Security live.
     "spending_before65_annual": 135545,
     "spending_after65_base_annual": 111900,
+    # Home purchase price (optional — Holdings shows value-only without it).
+    "home_purchase_price": "",
 }
 
 

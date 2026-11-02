@@ -150,8 +150,8 @@ class App(ctk.CTk):
         self.prices = pc.load_price_cache(CACHE)
         self.home_value = pc.HOME_DEFAULT
         self.data = None
-        self.data_win = None
-        self.status_var = tk.StringVar(value="Ready — press Refresh prices.")
+        self.cov_lots = None
+        self.status_var = tk.StringVar(value="Ready — open the ☰ menu.")
 
         # ---- Top bar (slim: actions live in the hamburger menu so a
         # narrow split-screen window never chops them) ----
@@ -169,19 +169,33 @@ class App(ctk.CTk):
                                    text_color="orange")
         self.status.pack(side="left", padx=8)
         self.menu_win = None
-        self.home_entry = None
+        self.bind_all("<MouseWheel>", self._wheel_scroll, add="+")
 
         # ---- Tabs ----
+        # Top level: Dashboard, Diversification, Tax Harvest, Data Entry.
+        # Dashboard holds Overview (landing), Accounts, Holdings, Liquidity,
+        # Tax implications. Data Entry holds Inputs, Template, Profile.
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=4)
-        for name in ("Charts", "Accounts", "Liquidity", "Diversification",
-                     "Rebalance", "Tax Harvest"):
+        for name in ("Dashboard", "Diversification", "Tax Harvest",
+                     "Data Entry"):
             self.tabs.add(name)
-        self.tabs.set("Charts")
+        self.dash_tabs = ctk.CTkTabview(self.tabs.tab("Dashboard"))
+        self.dash_tabs.pack(fill="both", expand=True, padx=4, pady=4)
+        for name in ("Overview", "Accounts", "Holdings", "Liquidity",
+                     "Tax implications"):
+            self.dash_tabs.add(name)
+        self.data_tabs = ctk.CTkTabview(self.tabs.tab("Data Entry"))
+        self.data_tabs.pack(fill="both", expand=True, padx=4, pady=4)
+        for name in ("Inputs", "Template", "Profile"):
+            self.data_tabs.add(name)
+        self.tabs.set("Dashboard")
+        self.dash_tabs.set("Overview")
         self.frames = {}
 
         self.recompute()
         self.build_all()
+        self.refresh_data_window()
 
     # ---- data ----
     def recompute(self):
@@ -191,13 +205,36 @@ class App(ctk.CTk):
                                self.cost_basis)
 
     def save_lots(self, msg="Data saved."):
+        # File + main views only. Data Entry refresh is explicit at each
+        # call site (structural rebuild vs in-place repaint, F5).
         pc.save_portfolio(PORTFOLIO_CSV, self.lots)
         self.recompute()
         self.build_all()
+        self.status_var.set(msg)
+
+    def lots_changed_externally(self, msg="Data saved."):
+        """Mutations from outside the grid (forms, uploads, type edits):
+        commit, then rebuild the grid (scroll preserved)."""
+        self.save_lots(msg)
         if getattr(self, "cov_lots", None) is not None:
             self._cov_reset()
         self.refresh_data_window()
-        self.status_var.set(msg)
+
+    def _cov_keep_scroll(self, fn):
+        scroll = getattr(self, "_cov_scroll", None)
+        y = None
+        try:
+            if scroll is not None and scroll.winfo_exists():
+                y = scroll._parent_canvas.yview()
+        except (tk.TclError, AttributeError):
+            y = None
+        fn()
+        if y:
+            try:
+                scroll._parent_canvas.yview_moveto(y[0])
+                scroll._parent_canvas.update_idletasks()
+            except (tk.TclError, AttributeError):
+                pass
 
     def refresh_async(self):
         self.status_var.set("Fetching prices from Yahoo Finance…")
@@ -215,6 +252,10 @@ class App(ctk.CTk):
         self.prices = prices
         self.recompute()
         self.build_all()
+        try:
+            self._cov_refresh_chrome()
+        except (tk.TclError, ValueError, AttributeError):
+            pass
         if errors:
             self.status_var.set("Price fetch partial — %s. "
                                 "Stale tickers use last-known prices."
@@ -234,11 +275,12 @@ class App(ctk.CTk):
         msg = pc.append_close(DRIFT_LOG, self.data["liquid"], self.home_value,
                               d["today_total"], d["standard_total"])
         self.status_var.set(msg)
-        self.build_charts()
+        self.build_diversification()
 
-    # ---- hamburger menu ----
+    # ---- hamburger menu: exactly three items ----
     def toggle_menu(self):
-        """Open/close the ☰ popup holding all actions."""
+        """Open/close the ☰ popup: Refresh stocks, Refresh home estimates,
+        Log. Data Entry is a tab now — no window opens from here."""
         if self.menu_win is not None and self.menu_win.winfo_exists():
             self._close_menu()
             return
@@ -249,22 +291,14 @@ class App(ctk.CTk):
         win.attributes("-topmost", True)
         win.geometry("+%d+%d" % (self.winfo_x() + self.winfo_width() - 320,
                                  self.winfo_y() + 60))
-        ctk.CTkLabel(win, text="Home (Zillow) $:").pack(
-            padx=12, pady=(12, 2), anchor="w")
-        self.home_entry = ctk.CTkEntry(win, width=200)
-        self.home_entry.insert(0, str(self.home_value))
-        self.home_entry.pack(padx=12, pady=2, anchor="w")
-        ctk.CTkButton(win, text="Apply home",
-                      command=self.apply_home_from_menu).pack(
-                          padx=12, pady=4, fill="x")
-        ctk.CTkButton(win, text="Refresh prices",
+        ctk.CTkButton(win, text="Refresh stocks",
                       command=self.refresh_from_menu).pack(
+                          padx=12, pady=(12, 4), fill="x")
+        ctk.CTkButton(win, text="Refresh home estimates",
+                      command=self.home_from_menu).pack(
                           padx=12, pady=4, fill="x")
-        ctk.CTkButton(win, text="Log today's close",
+        ctk.CTkButton(win, text="Log",
                       command=self.log_from_menu).pack(
-                          padx=12, pady=4, fill="x")
-        ctk.CTkButton(win, text="Manage data",
-                      command=self.manage_data_from_menu).pack(
                           padx=12, pady=(4, 12), fill="x")
         self.menu_win = win
         # CustomTkinter withdraws a new Toplevel on Windows while theming
@@ -281,24 +315,6 @@ class App(ctk.CTk):
             self.menu_win.destroy()
         self.menu_win = None
 
-    def apply_home(self):
-        if self.home_entry is None or not self.home_entry.winfo_exists():
-            self.status_var.set("Open the ☰ menu to set the home value.")
-            return
-        try:
-            self.home_value = float(self.home_entry.get().replace(",", "")
-                                    .replace("$", ""))
-        except ValueError:
-            self.status_var.set("Home value not a number — kept previous.")
-            return
-        self.recompute()
-        self.build_all()
-        self.status_var.set("Home updated to %s." % money(self.home_value))
-
-    def apply_home_from_menu(self):
-        self.apply_home()
-        self._close_menu()
-
     def refresh_from_menu(self):
         self._close_menu()
         self.refresh_async()
@@ -307,9 +323,39 @@ class App(ctk.CTk):
         self._close_menu()
         self.log_close()
 
-    def manage_data_from_menu(self):
+    def home_from_menu(self):
         self._close_menu()
-        self.open_data_window()
+        win = ctk.CTkToplevel(self)
+        win.title("Home estimate")
+        win.transient(self)
+        win.resizable(False, False)
+        ctk.CTkLabel(win, text="Latest home value estimate $ "
+                               "(e.g. from Zillow):").pack(padx=12,
+                                                           pady=(12, 2),
+                                                           anchor="w")
+        ent = ctk.CTkEntry(win, width=200)
+        ent.insert(0, str(self.home_value))
+        ent.pack(padx=12, pady=2, anchor="w")
+        msg = ctk.CTkLabel(win, text="", text_color="orange")
+        msg.pack(padx=12, anchor="w")
+
+        def apply():
+            try:
+                self.home_value = float(ent.get().replace(",", "")
+                                        .replace("$", ""))
+            except ValueError:
+                msg.configure(text="Not a number — kept previous.")
+                return
+            win.destroy()
+            self.recompute()
+            self.build_all()
+            self.status_var.set("Home updated to %s."
+                                % money(self.home_value))
+
+        ctk.CTkButton(win, text="Apply", command=apply).pack(
+            padx=12, pady=(4, 12), fill="x")
+        win.after(50, lambda: (win.deiconify(), win.lift())
+                  if win.winfo_exists() else None)
 
     # ---- builders ----
     def _clear(self, tab):
@@ -318,16 +364,176 @@ class App(ctk.CTk):
             w.destroy()
         return frame
 
+    def _clear_dash(self, tab):
+        frame = self.dash_tabs.tab(tab)
+        for w in frame.winfo_children():
+            w.destroy()
+        return frame
+
     def build_all(self):
+        # Main views only — Data Entry refresh is explicit at each call
+        # site (structural rebuild vs in-place repaint, fix 5).
+        self.build_overview()
         self.build_accounts()
+        self.build_holdings()
         self.build_liquidity()
+        self.build_taximplic()
         self.build_diversification()
-        self.build_rebalance()
         self.build_tax()
-        self.build_charts()
+
+    def _goto(self, top, sub=None):
+        self.tabs.set(top)
+        if sub is not None and top == "Dashboard":
+            self.dash_tabs.set(sub)
+
+    def _wheel_scroll(self, event):
+        # Global wheel: scroll whichever CTkScrollableFrame sits under the
+        # cursor, so scrolling works over entry fields too.
+        try:
+            target = self.winfo_containing(event.x_root, event.y_root)
+        except tk.TclError:
+            return
+        w = target
+        while w is not None:
+            if isinstance(w, (ctk.CTkTextbox, tk.Text)):
+                try:
+                    w.yview_scroll(-1 * (event.delta // 120), "units")
+                except tk.TclError:
+                    pass
+                return "break"
+            if isinstance(w, ctk.CTkScrollableFrame):
+                try:
+                    w._parent_canvas.yview_scroll(
+                        -1 * (event.delta // 120) or -1 * (event.delta > 0
+                                                           and 1 or -1),
+                        "units")
+                except (tk.TclError, AttributeError):
+                    pass
+                return "break"
+            w = w.master
+
+    def _required_missing(self):
+        return sum(
+            1 for lot in pc.open_lots(self.lots)
+            if lot.get("account_type") == "Taxable"
+            and lot.get("asset") != pc.CASH_ASSET
+            and (lot.get("cost") is None or not lot.get("acquired")))
+
+    def build_overview(self):
+        f = self._clear_dash("Overview")
+        tnw = self.data["tnw"]
+        sp = pc.spending_capacity(self.profile)
+        d = self.data["drift"]
+        year = datetime.date.today().year
+        realized, _unk, _rows = pc.realized_gains_year(
+            self.lots, year,
+            self.profile.get("other_realized_gains_current_year", 0) or 0.0)
+        leeway = pc.TLH_CAP - realized
+        missing = self._required_missing()
+        ctk.CTkLabel(f, text="Total net worth: %s" % money(tnw),
+                     font=ctk.CTkFont(size=22, weight="bold")).pack(
+                         padx=10, pady=(10, 2), anchor="w")
+        ctk.CTkLabel(
+            f, text="Allowed spending: %s/yr before 65 · %s/yr after 65 "
+                    "(base %s + Social Security)." % (
+                        money(sp["before65"]), money(sp["after65_allin"]),
+                        money(sp["after65_base"])),
+            font=ctk.CTkFont(size=14)).pack(padx=10, pady=2, anchor="w")
+        alerts = [
+            "Drift vs standard: actual %s vs standard %s (%s)." % (
+                pct(d["actual_ytd"]), pct(d["standard_ytd"]),
+                pct(d["drift_pp"])),
+            "Tax-loss-harvest leeway: %s of the $15,000 cap." % money(leeway),
+            "%d REQUIRED position(s) still missing cost/dates — feed them "
+            "in Data Entry." % missing if missing else
+            "All REQUIRED positions have cost and dates.",
+        ]
+        for alert in alerts:
+            ctk.CTkLabel(f, text="• " + alert, wraplength=1100,
+                         anchor="w").pack(padx=10, pady=1, anchor="w")
+        ctk.CTkLabel(f, text="Go to:",
+                     font=ctk.CTkFont(weight="bold")).pack(padx=10,
+                                                           pady=(10, 2),
+                                                           anchor="w")
+        cards = ctk.CTkFrame(f, fg_color="transparent")
+        cards.pack(fill="x", padx=10, pady=4)
+        for label, top, sub in (
+                ("Diversification", "Diversification", None),
+                ("Tax Harvest", "Tax Harvest", None),
+                ("Data Entry", "Data Entry", None),
+                ("Accounts", "Dashboard", "Accounts"),
+                ("Holdings", "Dashboard", "Holdings"),
+                ("Liquidity", "Dashboard", "Liquidity"),
+                ("Tax implications", "Dashboard", "Tax implications")):
+            ctk.CTkButton(cards, text=label, width=150,
+                          command=lambda t=top, s=sub: self._goto(t, s)).pack(
+                              side="left", padx=4, pady=4)
+
+    def build_holdings(self):
+        f = self._clear_dash("Holdings")
+        rows, _total = pc.holdings_by_asset(
+            self.lots, self.prices, self.home_value,
+            self.profile.get("home_purchase_price") or None)
+        table_rows = []
+        for r in rows:
+            avg = "--" if r["avg_cost"] is None else "$%.2f" % r["avg_cost"]
+            if r["missing"] > 1e-9:
+                avg += " (%s sh no cost)" % pc._fmt_shares(r["missing"])
+            table_rows.append([
+                r["asset"], pc._fmt_shares(r["shares"]), avg,
+                "--" if r["price"] is None else "$%.2f" % r["price"],
+                money(r["value"]),
+                "--" if r["gain"] is None else money(r["gain"]),
+                "--" if r["gain_pct"] is None else "%.1f%%" % (
+                    r["gain_pct"] * 100)])
+        Table(f, ["Asset", "Total shares", "Avg purchase price",
+                  "Current price", "Current value", "Net gain $",
+                  "Net gain %"],
+              table_rows).pack(fill="both", expand=True, padx=6, pady=6)
+        for r in rows:
+            if not r["by_acct"]:
+                continue
+            box = ctk.CTkFrame(f)
+            box.pack(fill="x", padx=6, pady=2)
+            detail = ctk.CTkFrame(box)
+            open_state = {"open": False}
+            btn = ctk.CTkButton(box, width=280, anchor="w",
+                                text="▸ %s by account" % r["asset"])
+            btn.pack(padx=4, pady=2, anchor="w")
+            btn.configure(command=lambda b=btn, bb=box, dd=detail, rr=r,
+                          st=open_state: self._holdings_toggle(
+                              bb, dd, rr, st, b))
+        ctk.CTkLabel(
+            f, text="Averages cover known-cost lots only; shares without "
+                    "cost are flagged, never averaged in. Cash lives in "
+                    "Liquidity. Home is one more row (value only unless a "
+                    "purchase price is set in the profile).",
+            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+
+    def _holdings_toggle(self, box, detail, row, state, btn):
+        state["open"] = not state["open"]
+        if state["open"]:
+            btn.configure(text="▾ %s by account" % row["asset"])
+            for acct in sorted(row["by_acct"]):
+                for lot in row["by_acct"][acct]:
+                    ctk.CTkLabel(
+                        detail,
+                        text="%s: %s sh @ %s, acq %s [%s]" % (
+                            acct, pc._fmt_shares(lot.get("shares")),
+                            "--" if lot.get("cost") is None
+                            else "$%.2f" % lot["cost"],
+                            lot.get("acquired") or "--",
+                            pc.lot_status(lot)),
+                        anchor="w").pack(padx=18, anchor="w")
+            detail.pack(fill="x", padx=4, pady=2)
+        else:
+            btn.configure(text="▸ %s by account" % row["asset"])
+            detail.pack_forget()
+            for w in detail.winfo_children():
+                w.destroy()
 
     def build_accounts(self):
-        f = self._clear("Accounts")
+        f = self._clear_dash("Accounts")
         d = self.data
         rows = []
         for r in d["view1"]:
@@ -364,34 +570,79 @@ class App(ctk.CTk):
                       command=self.reopen_form).pack(side="left", padx=4)
 
     def build_liquidity(self):
-        f = self._clear("Liquidity")
+        f = self._clear_dash("Liquidity")
+        vals = pc.account_values(self.lots, self.prices)
+        banks = {}
+        for (bank, acct), v in vals.items():
+            banks.setdefault(bank, []).append((acct, v))
+        rows = []
+        for bank in sorted(banks):
+            for acct, v in sorted(banks[bank]):
+                rows.append([bank, acct, money(v)])
+            rows.append(["**%s total" % bank, "",
+                         "**" + money(sum(v for _, v in banks[bank]))])
+        rows.append(["**OVERALL LIQUID (excl. home)", "",
+                     "**" + money(self.data["liquid"])])
+        Table(f, ["Bank / Brokerage", "Account", "Liquid value $"],
+              rows).pack(fill="both", expand=True, padx=6, pady=6)
         v = self.data["view2"]
         sp = pc.spending_capacity(self.profile)
-        rows = [
-            ["< 65 -- available now", money(v["lt"]), pct(v["lt_pct"]),
-             "Funds %s/yr spend until 65" % money(sp["before65"])],
-            ["> 65 -- IRA/401(k) unlock", money(v["gt"]), pct(v["gt_pct"]),
-             "Funds %s/yr + SS after 65" % money(sp["after65_base"])],
-            ["Real Estate (home) -- illiquid", money(v["re"]),
-             pct(v["re_pct"]), "Not spendable; tracks Zillow"],
-            ["**TOTAL NET WORTH", "**" + money(v["tnw"]), "**100.0%", ""],
-        ]
-        Table(f, ["Access", "Value $", "% of net worth", "What it funds"],
-              rows).pack(fill="both", expand=True, padx=6, pady=6)
         ctk.CTkLabel(
             f, text="Spendability (sheet-ported, live from profile): before "
                     "65 %s/yr ($%s/mo). After 65: %s/yr ($%s/mo) + owner SS "
-                    "$%s/mo + spouse SS $%s/mo = %s/mo all-in."
+                    "$%s/mo + spouse SS $%s/mo = %s/mo all-in. Under-65 "
+                    "spendable %s · over-65 unlock %s."
                     % (money(sp["before65"]), money(sp["before65"] / 12),
                        money(sp["after65_base"]),
                        money(sp["after65_base"] / 12),
                        money(self.profile.get("ss_owner_monthly", 0)),
                        money(self.profile.get("ss_spouse_monthly", 0)),
-                       money(sp["after65_allin"] / 12)),
+                       money(sp["after65_allin"] / 12),
+                       money(v["lt"]), money(v["gt"])),
             wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
 
+    TAX_TYPE_NOTES = {
+        "Traditional IRA": "Withdrawals taxed as income; required minimum "
+                           "distributions (RMDs) apply from the statutory "
+                           "age.",
+        "Roth IRA": "Qualified withdrawals tax-free; no owner RMDs.",
+        "Taxable": "Capital gains tax on sale (short vs long term by "
+                   "holding period); tax-loss harvesting eligible.",
+        "HSA": "Tax-free for qualified medical expenses.",
+        "Cash": "N/A — spendable, no investment tax treatment.",
+    }
+
+    def build_taximplic(self):
+        f = self._clear_dash("Tax implications")
+        ctk.CTkLabel(
+            f, text="What each account type means for tax and withdrawals "
+                    "(facts, not advice).",
+            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+        Table(f, ["Account type", "Tax / withdrawal treatment"],
+              [["**" + t, self.TAX_TYPE_NOTES[t]] for t in
+               ("Traditional IRA", "Roth IRA", "Taxable", "HSA", "Cash")]
+              ).pack(fill="x", padx=6, pady=6)
+        seen = {}
+        for lot in self.lots:
+            seen.setdefault(lot.get("account"),
+                            lot.get("account_type") or "?")
+        Table(f, ["Account", "Type"],
+              [[a, seen[a]] for a in sorted(seen)]
+              ).pack(fill="both", expand=True, padx=6, pady=6)
+
     def build_diversification(self):
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
         f = self._clear("Diversification")
+        ctk.CTkLabel(
+            f, text="The standard — 15:15:35:15:20 over total net worth. "
+                    "BTC 15% (asymmetric upside, not maxi: 9% spot/ETF + 6% "
+                    "MSTR) · Gold 15% (structural hedge against technology) "
+                    "· Equities 35% (growth engine) · Cash 15% (buffer, "
+                    "incl. 20% STRC) · RE 20% (home anchor). NOTE: STRC is "
+                    "BTC-correlated preferred, so effective BTC exposure "
+                    "runs ~2–3pp above stated.",
+            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
         rows = []
         for r in self.data["view3"]:
             rows.append([r["bucket"], pct(r["target_pct"]),
@@ -401,23 +652,16 @@ class App(ctk.CTk):
                          money(r["rebalance"])])
         Table(f, ["Bucket", "Target %", "Target $", "Actual $", "Actual %",
                   "Deviation (pp)", "Rebalance buy(+) / sell(-)"],
-              rows).pack(fill="both", expand=True, padx=6, pady=6)
+              rows).pack(fill="both", padx=6, pady=6)
+        fig1 = Figure(figsize=(10, 4.2), dpi=100)
+        pc.make_allocation_chart(fig1, self.data["view3"])
+        FigureCanvasTkAgg(fig1, master=f).get_tk_widget().pack(
+            fill="both", padx=6, pady=6)
         ctk.CTkLabel(
-            f, text="Standard v3 = 15:15:35:15:20 over TOTAL net worth. "
-                    "BTC 15% = 9% spot/ETF + 6% MSTR. Cash 15% incl 20% STRC. "
-                    "RE 20% = your home (Zillow; structural, can't rebalance). "
-                    "NOTE: STRC is BTC-correlated preferred — in a BTC crash "
-                    "your 'cash' won't act like cash; effective BTC exposure "
-                    "runs ~2-3pp above stated.",
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
-
-    def build_rebalance(self):
-        f = self._clear("Rebalance")
-        ctk.CTkLabel(
-            f, text="VIEW 4 — REBALANCE PLAN (display only, NEVER executes "
+            f, text="REBALANCE PLAN (display only, NEVER executes "
                     "trades). All 4 trades inside Schwab Ashu IRA: $0 tax, "
                     "Medi-Cal safe. Verify on the trade ticket before "
-                    "executing; tell Brownie after each execution.",
+                    "executing.",
             wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
         rows = []
         for t in self.data["view4"]["trades"]:
@@ -444,16 +688,26 @@ class App(ctk.CTk):
                      "**" + pct(v4["after_total"] / tnw) if tnw else "--"])
         Table(f, ["Bucket", "Before $", "Before %", "After $", "After %"],
               rows).pack(fill="both", padx=6, pady=6)
-        ctk.CTkLabel(
-            f, text="Landing ≈ 15.0 / 15.0 / 35.0 / 16.5 / 18.5 — BTC, gold "
-                    "and equities on target; the ~1.5pp cash overweight is "
-                    "the residual (liquid can't fund the RE gap without "
-                    "selling the house, so cash absorbs it). New BTC money "
-                    "goes to IBIT: MSTR is already ~6.7% vs the 6% sub-target.",
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+        d = self.data["drift"]
+        drift_txt = (
+            "Drift (calendar-year baseline $4,526K = liquid $3,595K + home "
+            "$931K): actual YTD %s | standard YTD %s | drift %s (%s) | "
+            "standard total %s"
+            % (pct(d["actual_ytd"]), pct(d["standard_ytd"]),
+               pct(d["drift_pp"]), money(d["drift_dollar"]),
+               money(d["standard_total"])))
+        ctk.CTkLabel(f, text=drift_txt, wraplength=1100,
+                     anchor="w").pack(padx=6, pady=6, anchor="w")
+        fig2 = Figure(figsize=(10, 8.5), dpi=100)
+        pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG))
+        FigureCanvasTkAgg(fig2, master=f).get_tk_widget().pack(
+            fill="both", expand=True, padx=6, pady=6)
 
     def build_tax(self):
         f = self._clear("Tax Harvest")
+        ctk.CTkLabel(f, text="Tax Loss Harvesting",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(
+                         padx=6, pady=(6, 0), anchor="w")
         year = datetime.date.today().year
         prices = self.prices
         rows = []
@@ -523,64 +777,20 @@ class App(ctk.CTk):
         ctk.CTkLabel(f, text=note, wraplength=1100,
                      anchor="w").pack(padx=6, pady=6, anchor="w")
 
-    def build_charts(self):
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-        from matplotlib.figure import Figure
-        f = self._clear("Charts")
-        d = self.data["drift"]
-        drift_txt = (
-            "Drift (calendar-year baseline $4,526K = liquid $3,595K + home "
-            "$931K): actual YTD %s | standard YTD %s | drift %s (%s) | "
-            "standard total %s"
-            % (pct(d["actual_ytd"]), pct(d["standard_ytd"]),
-               pct(d["drift_pp"]), money(d["drift_dollar"]),
-               money(d["standard_total"])))
-        ctk.CTkLabel(f, text=drift_txt, wraplength=1100,
-                     anchor="w").pack(padx=6, pady=6, anchor="w")
-        fig1 = Figure(figsize=(10, 4.2), dpi=100)
-        pc.make_allocation_chart(fig1, self.data["view3"])
-        FigureCanvasTkAgg(fig1, master=f).get_tk_widget().pack(
-            fill="both", padx=6, pady=6)
-        # Tall drift chart: the whole reason for leaving Google Sheets.
-        fig2 = Figure(figsize=(10, 8.5), dpi=100)
-        pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG))
-        FigureCanvasTkAgg(fig2, master=f).get_tk_widget().pack(
-            fill="both", expand=True, padx=6, pady=6)
+    # (Charts merged into build_diversification; Rebalance merged too.)
 
 
-    # ---- Data window (Manage data) ----
-    def open_data_window(self):
-        if self.data_win is not None and self.data_win.winfo_exists():
-            self.data_win.lift()
-            self.data_win.focus_force()
-            return
-        win = ctk.CTkToplevel(self)
-        win.title("Manage data")
-        win.geometry("1120x760")
-        win.transient(self)
-        tabs = ctk.CTkTabview(win)
-        tabs.pack(fill="both", expand=True, padx=10, pady=10)
-        for name in ("Coverage", "Template", "Profile"):
-            tabs.add(name)
-        self.data_win = win
-        self.data_tabs = tabs
-        self.cov_lots = []
-        self.cov_next_rid = 0
-        self.cov_filter = None
-        self.cov_guide = None
-        self._cov_reset()
-        win.protocol("WM_DELETE_WINDOW", self._close_data_window)
-        self.refresh_data_window()
-        win.after(50, self._show_data_window)
-
-    def _show_data_window(self):
-        if self.data_win is not None and self.data_win.winfo_exists():
-            self.data_win.deiconify()
-            self.data_win.lift()
+    # ---- Data Entry tab (Inputs / Template / Profile) ----
+    def _ensure_cov_state(self):
+        if getattr(self, "cov_lots", None) is None:
+            self.cov_lots = []
+            self.cov_next_rid = 0
+            self.cov_filter = None
+            self.cov_guide = None
+            self._cov_reset()
 
     def refresh_data_window(self):
-        if self.data_win is None or not self.data_win.winfo_exists():
-            return
+        self._ensure_cov_state()
         self.build_data_coverage()
         self.build_data_template()
         self.build_data_profile()
@@ -592,18 +802,19 @@ class App(ctk.CTk):
         return frame
 
     def build_data_coverage(self):
-        f = self._clear_data_tab("Coverage")
+        f = self._clear_data_tab("Inputs")
         self.cov_nav_rows = []
         self.cov_widgets = {}
+        self._cov_scroll = None
         t = self._cov_totals()
         top = ctk.CTkFrame(f, fg_color="transparent")
         top.pack(fill="x", padx=8, pady=(8, 2))
-        ctk.CTkLabel(
+        self.cov_progress = ctk.CTkLabel(
             top, text="Holdings %d/%d · Cost %d/%d · Acquired dates %d/%d" % (
                 t["holdings_ok"], t["holdings_n"], t["cost_ok"], t["cost_n"],
                 t["acq_ok"], t["acq_n"]),
-            font=ctk.CTkFont(size=15, weight="bold")).pack(
-                side="left", padx=4)
+            font=ctk.CTkFont(size=15, weight="bold"))
+        self.cov_progress.pack(side="left", padx=4)
         n = self._cov_counts()
         self.cov_save_btn = ctk.CTkButton(
             top, text="Save (%d)" % n, width=110,
@@ -612,6 +823,9 @@ class App(ctk.CTk):
         self.cov_save_btn.pack(side="right", padx=4)
         ctk.CTkButton(top, text="Revert", width=80,
                       command=self._cov_revert).pack(side="right", padx=4)
+        ctk.CTkButton(top, text="+ Add account", width=110,
+                      command=self._cov_add_account).pack(side="right",
+                                                         padx=4)
         if self.cov_filter:
             ctk.CTkButton(top, text="Show all", width=80,
                           command=self._cov_show_all).pack(side="right",
@@ -633,8 +847,22 @@ class App(ctk.CTk):
                         "Edit on a row to change it. Typing never recomputes; "
                         "Save commits everything at once.",
                 wraplength=1050, anchor="w").pack(padx=8, pady=2, anchor="w")
+        if not self.cov_lots:
+            ctk.CTkLabel(
+                f, text="No accounts yet.",
+                font=ctk.CTkFont(size=16, weight="bold")).pack(
+                    padx=8, pady=(24, 4))
+            ctk.CTkButton(f, text="Add your first bank / account",
+                          width=240,
+                          command=self._cov_add_account).pack(padx=8, pady=8)
+            ctk.CTkLabel(
+                f, text="Or upload a filled template in the Template sub-tab.",
+                wraplength=600).pack(padx=8, pady=4)
+            self._cov_refresh_chrome()
+            return
         scroll = ctk.CTkScrollableFrame(f)
         scroll.pack(fill="both", expand=True, padx=8, pady=8)
+        self._cov_scroll = scroll
         groups = {}
         for row in self.cov_lots:
             groups.setdefault(row.get("bank") or "?",
@@ -690,10 +918,9 @@ class App(ctk.CTk):
         hdr = ctk.CTkFrame(box, fg_color="transparent")
         hdr.pack(fill="x", padx=6)
         for col, (txt, w) in enumerate(
-                [("Bank", 80), ("Account", 150), ("Asset", 110),
-                 ("Shares", 80), ("Cost $", 80), ("Acquired", 120),
-                 ("Sold", 120), ("Sale $", 80), ("", 175),
-                 ("", 52), ("", 52)]):
+                [("Asset", 110), ("Shares", 80), ("Cost $", 80),
+                 ("Acquired", 120), ("Sold", 120), ("Sale $", 80),
+                 ("", 175), ("", 24), ("", 52), ("", 52)]):
             ctk.CTkLabel(hdr, text=txt, width=w,
                          font=ctk.CTkFont(weight="bold")).grid(
                              row=0, column=col, padx=2)
@@ -722,72 +949,76 @@ class App(ctk.CTk):
         return t
 
     def _cov_row(self, box, row):
+        # Grid columns: Asset, Shares, Cost, Acquired, Sold, Sale, Math,
+        # marker, Edit, Del. Bank/Account live in the edit drawer (row 1)
+        # and the section header — not as grid columns (fix 3).
         rid = row["_rid"]
-        locked = row.get("_locked", True)
-        state = "disabled" if locked else "normal"
         fr = ctk.CTkFrame(box, fg_color="transparent")
         fr.pack(fill="x", padx=6, pady=1)
         W = self.cov_widgets.setdefault(rid, {})
+        W["frame"] = fr
+        try:
+            W["frame_def"] = fr.cget("fg_color")
+        except tk.TclError:
+            W["frame_def"] = "transparent"
+        W["lockables"] = []
         nav = []
 
-        def entry(col, width, value):
+        def entry(parent, col, width, value, erow=0):
             var = tk.StringVar(value="" if value is None else str(value))
-            ent = ctk.CTkEntry(fr, width=width, textvariable=var,
-                               state=state)
-            ent.grid(row=0, column=col, padx=2)
+            ent = ctk.CTkEntry(parent, width=width, textvariable=var)
+            ent.grid(row=erow, column=col, padx=2)
             return ent, var
 
-        bank_ent, bank_var = entry(0, 80, row.get("bank", ""))
-        W["bank"], W["bank_var"] = bank_ent, bank_var
-        try:
-            W["bd_def"] = bank_ent.cget("border_color")
-        except tk.TclError:
-            W["bd_def"] = "gray"
-        bank_var.trace_add(
-            "write", lambda *_a, r=rid: self._cov_typed(r, "bank"))
-        nav.append(bank_ent)
+        def snap(ent):
+            try:
+                W.setdefault("entry_fg_def", ent.cget("fg_color"))
+                W.setdefault("entry_tx_def", ent.cget("text_color"))
+            except tk.TclError:
+                pass
+            W["lockables"].append(ent)
 
-        accounts = sorted({r.get("account") for r in self.cov_lots
-                           if r.get("account")})
         assets = sorted({r.get("asset") for r in self.cov_lots
                          if r.get("asset")})
 
-        def pick_cell(col, field, options, width, current):
-            cell = ctk.CTkFrame(fr, fg_color="transparent")
-            cell.grid(row=0, column=col, padx=2)
-            vals = list(options) + ["< new >"]
-            menu = ctk.CTkOptionMenu(
-                cell, width=width, values=vals, state=state,
-                command=lambda v, r=rid, f=field: self._cov_menu(r, f, v))
-            menu.pack()
-            new_var = tk.StringVar()
-            new_ent = ctk.CTkEntry(cell, width=width, textvariable=new_var,
-                                   state=state)
-            if current in options:
-                menu.set(current)
-            else:
-                menu.set("< new >")
-                new_var.set(current or "")
-                new_ent.pack()
-            new_var.trace_add(
-                "write", lambda *_a, r=rid, f=field: self._cov_typed(r, f))
-            W[field + "_menu"] = menu
-            W[field + "_new"] = new_ent
-            W[field + "_new_var"] = new_var
-            nav.append(menu)
-            return menu
-
-        pick_cell(1, "account", accounts, 150, row.get("account") or "")
-        pick_cell(2, "asset", assets, 110, row.get("asset") or "")
+        # asset menu + free-text (col 0)
+        acell = ctk.CTkFrame(fr, fg_color="transparent")
+        acell.grid(row=0, column=0, padx=2)
+        avals = assets + ["< new >"]
+        amenu = ctk.CTkOptionMenu(
+            acell, width=110, values=avals,
+            command=lambda v, r=rid: self._cov_menu(r, "asset", v))
+        amenu.pack()
+        anew_var = tk.StringVar()
+        anew = ctk.CTkEntry(acell, width=110, textvariable=anew_var)
+        cur_a = row.get("asset") or ""
+        if cur_a in assets:
+            amenu.set(cur_a)
+        else:
+            amenu.set("< new >")
+            anew_var.set(cur_a)
+            anew.pack()
+        anew_var.trace_add(
+            "write", lambda *_a, r=rid: self._cov_typed(r, "asset"))
+        W["asset_menu"] = amenu
+        W["asset_new"] = anew
+        W["asset_new_var"] = anew_var
+        W["asset_place"] = "pack"
+        W["asset_col"] = 0
+        snap(amenu)
+        snap(anew)
         try:
-            W["fg_def"] = W["account_menu"].cget("fg_color")
+            W["fg_def"] = amenu.cget("fg_color")
         except tk.TclError:
             W["fg_def"] = None
+        nav.append(amenu)
 
-        sh_ent, sh_var = entry(3, 80, row.get("shares"))
-        co_ent, co_var = entry(4, 80, row.get("cost"))
+        sh_ent, sh_var = entry(fr, 1, 80, row.get("shares"))
+        co_ent, co_var = entry(fr, 2, 80, row.get("cost"))
         W.update(shares=sh_ent, shares_var=sh_var, cost=co_ent,
                  cost_var=co_var)
+        for _e in (sh_ent, co_ent):
+            snap(_e)
         sh_var.trace_add(
             "write", lambda *_a, r=rid: self._cov_typed(r, "shares"))
         co_var.trace_add(
@@ -795,42 +1026,101 @@ class App(ctk.CTk):
         nav += [sh_ent, co_ent]
 
         def date_cell(col, field):
-            acell = ctk.CTkFrame(fr, fg_color="transparent")
-            acell.grid(row=0, column=col, padx=2)
+            acell2 = ctk.CTkFrame(fr, fg_color="transparent")
+            acell2.grid(row=0, column=col, padx=2)
             var = tk.StringVar(value=row.get(field) or "")
-            ent = ctk.CTkEntry(acell, width=88, textvariable=var,
-                               state=state)
+            ent = ctk.CTkEntry(acell2, width=88, textvariable=var)
             ent.pack(side="left")
-            ctk.CTkButton(acell, text="📅", width=28,
-                          state=state,
-                          command=lambda r=rid, f=field:
-                          self._cov_calendar(r, f)).pack(side="left", padx=1)
+            btn = ctk.CTkButton(acell2, text="\U0001F4C5", width=28,
+                                command=lambda r=rid, f=field:
+                                self._cov_calendar(r, f))
+            btn.pack(side="left", padx=1)
             var.trace_add(
                 "write", lambda *_a, r=rid, f=field: self._cov_typed(r, f))
             W[field] = ent
             W[field + "_var"] = var
+            W["lockables"].append(btn)
+            snap(ent)
             nav.append(ent)
 
-        date_cell(5, "acquired")
-        date_cell(6, "sold_date")
-        sa_ent, sa_var = entry(7, 80, row.get("sale_price"))
+        date_cell(3, "acquired")
+        date_cell(4, "sold_date")
+        sa_ent, sa_var = entry(fr, 5, 80, row.get("sale_price"))
         W.update(sale_price=sa_ent, sale_price_var=sa_var)
+        snap(sa_ent)
         sa_var.trace_add(
             "write", lambda *_a, r=rid: self._cov_typed(r, "sale_price"))
         nav.append(sa_ent)
 
         math = ctk.CTkLabel(fr, text="", width=175, anchor="w")
-        math.grid(row=0, column=8, padx=2)
+        math.grid(row=0, column=6, padx=2)
         W["math"] = math
-        edit = ctk.CTkButton(fr, text="Lock" if not locked else "Edit",
-                             width=52,
+        try:
+            W["math_def"] = math.cget("text_color")
+        except tk.TclError:
+            W["math_def"] = None
+        marker = ctk.CTkLabel(fr, text="●", width=24, text_color="orange")
+        marker.grid(row=0, column=7, padx=2)
+        W["marker"] = marker
+        edit = ctk.CTkButton(fr, text="Edit", width=52,
                              command=lambda r=rid: self._cov_toggle_lock(r))
-        edit.grid(row=0, column=9, padx=2)
+        edit.grid(row=0, column=8, padx=2)
+        W["edit"] = edit
         ctk.CTkButton(fr, text="Del", width=52,
                       command=lambda r=rid: self._cov_delete(r)).grid(
-                          row=0, column=10, padx=2)
+                          row=0, column=9, padx=2)
+
+        # edit drawer (row 1): bank + account dropdowns
+        drawer = ctk.CTkFrame(fr, fg_color="transparent")
+        drawer.grid(row=1, column=0, columnspan=10, sticky="w", padx=2)
+        W["drawer"] = drawer
+        ctk.CTkLabel(drawer, text="Bank / Brokerage:").pack(side="left",
+                                                            padx=2)
+        bank_var = tk.StringVar(value=row.get("bank", ""))
+        bank = ctk.CTkEntry(drawer, width=110, textvariable=bank_var)
+        bank.pack(side="left", padx=2)
+        bank_var.trace_add(
+            "write", lambda *_a, r=rid: self._cov_typed(r, "bank"))
+        W["bank"] = bank
+        W["bank_var"] = bank_var
+        snap(bank)
+        ctk.CTkLabel(drawer, text="Account:").pack(side="left", padx=2)
+        accounts = sorted({r.get("account") for r in self.cov_lots
+                           if r.get("account")})
+        acell3 = ctk.CTkFrame(drawer, fg_color="transparent")
+        acell3.pack(side="left", padx=2)
+        cvals = accounts + ["< new >"]
+        cmenu = ctk.CTkOptionMenu(
+            acell3, width=170, values=cvals,
+            command=lambda v, r=rid: self._cov_menu(r, "account", v))
+        cmenu.pack(side="left")
+        cnew_var = tk.StringVar()
+        cnew = ctk.CTkEntry(acell3, width=170, textvariable=cnew_var)
+        cur_c = row.get("account") or ""
+        if cur_c in accounts:
+            cmenu.set(cur_c)
+        else:
+            cmenu.set("< new >")
+            cnew_var.set(cur_c)
+            cnew.pack(side="left")
+        cnew_var.trace_add(
+            "write", lambda *_a, r=rid: self._cov_typed(r, "account"))
+        W["account_menu"] = cmenu
+        W["account_new"] = cnew
+        W["account_new_var"] = cnew_var
+        W["account_place"] = "pack"
+        W["account_place"] = "pack"
+        snap(cmenu)
+        snap(cnew)
+        try:
+            W["bd_def"] = bank.cget("border_color")
+        except tk.TclError:
+            W["bd_def"] = "gray"
+        nav.append(bank)
+
         ridx = len(self.cov_nav_rows)
         self.cov_nav_rows.append(nav)
+        W["nav"] = nav
         for cidx, widget in enumerate(nav):
             widget.bind("<Return>", lambda _e, rr=ridx, c=cidx:
                         self._cov_move(rr + 1, c))
@@ -839,17 +1129,150 @@ class App(ctk.CTk):
             widget.bind("<Down>", lambda _e, rr=ridx, c=cidx:
                         self._cov_move(rr + 1, c))
         self._cov_sync_new_visibility(rid)
+        self._cov_apply_lock_visual(rid)
         self._cov_paint_row(rid)
+
+    def _cov_apply_lock_visual(self, rid):
+        # In-place lock/unlock: states, drawer, white editing row (fix 4),
+        # dirty marker. No rebuild, no scroll jump (fix 5).
+        W = self.cov_widgets.get(rid, {})
+        try:
+            row = self._cov_row_by_rid(rid)
+        except StopIteration:
+            return
+        if "frame" not in W:
+            return
+        locked = row.get("_locked", True)
+        state = "disabled" if locked else "normal"
+        for w in W.get("lockables", []):
+            try:
+                w.configure(state=state)
+            except (tk.TclError, ValueError):
+                pass
+        drawer = W.get("drawer")
+        if drawer is not None:
+            try:
+                if locked:
+                    drawer.grid_remove()
+                else:
+                    drawer.grid(row=1, column=0, columnspan=10, sticky="w",
+                                padx=2)
+            except tk.TclError:
+                pass
+        fr = W["frame"]
+        entry_fg = W.get("entry_fg_def")
+        entry_tx = W.get("entry_tx_def")
+        try:
+            if locked:
+                if W.get("frame_def") is not None:
+                    fr.configure(fg_color=W["frame_def"])
+            else:
+                fr.configure(fg_color="white")
+        except (tk.TclError, ValueError):
+            pass
+        for key in ("bank", "shares", "cost", "acquired", "sold_date",
+                    "sale_price", "account_new", "asset_new"):
+            w = W.get(key)
+            if w is None:
+                continue
+            try:
+                if locked:
+                    if entry_fg is not None:
+                        w.configure(fg_color=entry_fg)
+                    if entry_tx is not None:
+                        w.configure(text_color=entry_tx)
+                else:
+                    w.configure(fg_color="white", text_color="black")
+            except (tk.TclError, ValueError):
+                pass
+        math = W.get("math")
+        if math is not None:
+            try:
+                if locked and W.get("math_def") is not None:
+                    math.configure(text_color=W["math_def"])
+                elif not locked:
+                    math.configure(text_color="black")
+            except (tk.TclError, ValueError):
+                pass
+        edit = W.get("edit")
+        if edit is not None:
+            try:
+                edit.configure(text="Edit" if locked else "Lock")
+            except (tk.TclError, ValueError):
+                pass
+        if row["_orig"] is None:
+            dirty = True
+        else:
+            try:
+                dirty = self._cov_stripped(row) != self._cov_stripped(
+                    self.lots[row["_orig"]])
+            except IndexError:
+                dirty = True
+        marker = W.get("marker")
+        if marker is not None:
+            try:
+                if locked and dirty:
+                    marker.grid(row=0, column=7, padx=2)
+                else:
+                    marker.grid_remove()
+            except tk.TclError:
+                pass
+
+    def _cov_repaint_all(self):
+        for rid, W in list(self.cov_widgets.items()):
+            if rid == "acctval" or not isinstance(W, dict):
+                continue
+            if "frame" not in W:
+                continue
+            try:
+                alive = W["frame"].winfo_exists()
+            except tk.TclError:
+                continue
+            if not alive:
+                continue
+            try:
+                self._cov_row_by_rid(rid)
+            except StopIteration:
+                continue
+            self._cov_apply_lock_visual(rid)
+            self._cov_paint_row(rid)
+        self._cov_refresh_chrome()
 
     def _cov_move(self, ridx, cidx):
         if 0 <= ridx < len(self.cov_nav_rows):
             row = self.cov_nav_rows[ridx]
             if 0 <= cidx < len(row):
                 try:
-                    row[cidx].focus_set()
+                    if row[cidx].winfo_exists():
+                        row[cidx].focus_set()
                 except tk.TclError:
                     pass
         return "break"
+
+    def _cov_rebind_nav(self):
+        self.cov_nav_rows = []
+        for row in self.cov_lots:
+            W = self.cov_widgets.get(row["_rid"], {})
+            nav = W.get("nav")
+            if not nav:
+                continue
+            try:
+                if not W.get("frame") or not W["frame"].winfo_exists():
+                    continue
+            except tk.TclError:
+                continue
+            ridx = len(self.cov_nav_rows)
+            self.cov_nav_rows.append(nav)
+            for cidx, widget in enumerate(nav):
+                try:
+                    widget.bind("<Return>", lambda _e, rr=ridx, c=cidx:
+                                self._cov_move(rr + 1, c))
+                    widget.bind("<Up>", lambda _e, rr=ridx, c=cidx:
+                                self._cov_move(rr - 1, c))
+                    widget.bind("<Down>", lambda _e, rr=ridx, c=cidx:
+                                self._cov_move(rr + 1, c))
+                except tk.TclError:
+                    pass
 
     def _cov_row_by_rid(self, rid):
         return next(r for r in self.cov_lots if r["_rid"] == rid)
@@ -860,7 +1283,6 @@ class App(ctk.CTk):
 
     def _cov_sync_new_visibility(self, rid):
         W = self.cov_widgets.get(rid, {})
-        row = self._cov_row_by_rid(rid)
         for field in ("account", "asset"):
             menu = W.get(field + "_menu")
             new_ent = W.get(field + "_new")
@@ -868,10 +1290,22 @@ class App(ctk.CTk):
                 continue
             picked_new = menu.get() == "< new >"
             has_new = bool(new_ent.winfo_manager())
+            place = W.get(field + "_place", "grid")
+            col = W.get(field + "_col", 0)
             if picked_new and not has_new:
-                new_ent.pack()
+                if place == "grid":
+                    menu.grid_remove()
+                    new_ent.grid(row=0, column=col, padx=2)
+                else:
+                    menu.pack_forget()
+                    new_ent.pack(side="left", padx=2)
             elif not picked_new and has_new:
-                new_ent.pack_forget()
+                if place == "grid":
+                    new_ent.grid_remove()
+                    menu.grid(row=0, column=col, padx=2)
+                else:
+                    new_ent.pack_forget()
+                    menu.pack(side="left", padx=2)
 
     def _cov_resolve(self, rid, field):
         W = self.cov_widgets[rid]
@@ -1037,10 +1471,21 @@ class App(ctk.CTk):
         # Cheap form chrome only: counts, warnings, values. NEVER a
         # portfolio recompute — Save owns the single recompute.
         n = self._cov_counts()
-        if getattr(self, "cov_save_btn", None) is not None and \
-                self.cov_save_btn.winfo_exists():
-            self.cov_save_btn.configure(
-                text="Save (%d)" % n, state="normal" if n else "disabled")
+        if getattr(self, "cov_save_btn", None) is not None:
+            try:
+                self.cov_save_btn.configure(
+                    text="Save (%d)" % n, state="normal" if n else "disabled")
+            except (tk.TclError, ValueError):
+                pass
+        if getattr(self, "cov_progress", None) is not None:
+            try:
+                t = self._cov_totals()
+                self.cov_progress.configure(
+                    text="Holdings %d/%d · Cost %d/%d · Acquired dates %d/%d"
+                         % (t["holdings_ok"], t["holdings_n"], t["cost_ok"],
+                            t["cost_n"], t["acq_ok"], t["acq_n"]))
+            except (tk.TclError, ValueError):
+                pass
         dup = {}
         for r in self.cov_lots:
             if pc.lot_status(r) != "Open":
@@ -1120,20 +1565,49 @@ class App(ctk.CTk):
                 0.0, old_und.get(k, 0.0) - new_und.get(k, 0.0))
             if need > 1e-9:
                 needs[k] = need
+        orig_keys = {pc.lot_key(l) for l in self.lots}
+        absent = {pc.lot_key(l) for l in new if pc.lot_key(l) not in orig_keys}
         new2 = [dict(l) for l in new]
-        derrs = pc.drawdown_amounts(new2, needs)
+        derrs = pc.drawdown_amounts(new2, needs, exclude_keys=absent)
         if derrs:
             self.cov_warn.configure(text="Save blocked:\n" + "\n".join(derrs))
             self.status_var.set("Coverage not saved — dated shares exceed "
                                 "the unattributed balance.")
             return False
+        n_rows_pre = len(self.cov_lots)
+        sec_pre = sorted((l.get("bank"), l.get("account"),
+                          pc.lot_status(l)) for l in self.lots)
         self.lots = new2
         self.save_lots("Coverage saved.")
+        sec_post = sorted((l.get("bank"), l.get("account"),
+                           pc.lot_status(l)) for l in self.lots)
+        moved = sec_pre != sec_post
+        # Rematch working rows to committed lots by content. Cost/date/share
+        # edits rematch fully (repaint in place, no scroll jump — fix 5);
+        # new/deleted/moved rows cannot rematch (structural rebuild).
+        used = set()
+        for row in self.cov_lots:
+            s = self._cov_stripped(row)
+            row["_orig"] = None
+            for j, lot in enumerate(self.lots):
+                if j in used:
+                    continue
+                if self._cov_stripped(lot) == s:
+                    row["_orig"] = j
+                    used.add(j)
+                    break
+            row["_locked"] = True
+        if not moved and len(self.lots) == n_rows_pre and all(
+                r["_orig"] is not None for r in self.cov_lots):
+            self._cov_repaint_all()
+        else:
+            self._cov_reset()
+            self._cov_keep_scroll(self.build_data_coverage)
         return True
 
     def _cov_revert(self):
         self._cov_reset()
-        self.build_data_coverage()
+        self._cov_keep_scroll(self.build_data_coverage)
         self.status_var.set("Unsaved coverage edits discarded.")
 
     def _cov_add_row(self, bank, acct):
@@ -1146,6 +1620,121 @@ class App(ctk.CTk):
         self.cov_next_rid += 1
         self.cov_lots.append(row)
         self.build_data_coverage()
+        self._cov_scroll_to_row(row["_rid"])
+
+    def _cov_scroll_to_row(self, rid):
+        W = self.cov_widgets.get(rid, {})
+        fr = W.get("frame")
+        scroll = getattr(self, "_cov_scroll", None)
+        if fr is None or scroll is None:
+            return
+        try:
+            cv = scroll._parent_canvas
+            cv.update_idletasks()
+            bbox = cv.bbox("all")
+            if not bbox or not bbox[3]:
+                return
+            cv.yview_moveto(max(0.0, min(1.0, (fr.winfo_y() - 100)
+                                         / bbox[3])))
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _cov_add_account(self):
+        # Covers BOTH cases: new account under an existing bank (dropdown)
+        # or under a new bank (free text). Creates the section with its
+        # first lot row — sections only exist once rows do.
+        win = ctk.CTkToplevel(self)
+        win.title("Add account")
+        win.transient(self)
+        win.resizable(False, False)
+        body = ctk.CTkFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=14, pady=14)
+        banks = sorted({r.get("bank") for r in self.cov_lots
+                        if r.get("bank")})
+        ctk.CTkLabel(body, text="Bank / Brokerage").pack(anchor="w", padx=4)
+        bank_menu = ctk.CTkOptionMenu(body, width=260,
+                                      values=banks + ["< new >"])
+        if banks:
+            bank_menu.set(banks[0])
+        bank_menu.pack(anchor="w", padx=4, pady=2)
+        bank_var = tk.StringVar()
+        bank_ent = ctk.CTkEntry(body, width=260, textvariable=bank_var)
+        if not banks:
+            bank_menu.set("< new >")
+            bank_ent.pack(anchor="w", padx=4, pady=2)
+        ctk.CTkLabel(body, text="Account name").pack(anchor="w", padx=4,
+                                                     pady=(8, 0))
+        acct_var = tk.StringVar()
+        ctk.CTkEntry(body, width=260, textvariable=acct_var).pack(
+            anchor="w", padx=4, pady=2)
+        ctk.CTkLabel(body, text="Account type (drives whether cost/dates "
+                                "are required)").pack(anchor="w", padx=4,
+                                                      pady=(8, 0))
+        type_menu = ctk.CTkOptionMenu(body, values=pc.ACCOUNT_TYPES,
+                                      width=260)
+        type_menu.set("Taxable")
+        type_menu.pack(anchor="w", padx=4, pady=2)
+        ctk.CTkLabel(body, text="First lot — asset").pack(anchor="w", padx=4,
+                                                          pady=(8, 0))
+        asset_var = tk.StringVar()
+        ctk.CTkEntry(body, width=260, textvariable=asset_var).pack(
+            anchor="w", padx=4, pady=2)
+        ctk.CTkLabel(body, text="First lot — shares").pack(anchor="w",
+                                                           padx=4, pady=(8, 0))
+        shares_var = tk.StringVar()
+        ctk.CTkEntry(body, width=260, textvariable=shares_var).pack(
+            anchor="w", padx=4, pady=2)
+        msg = ctk.CTkLabel(body, text="", text_color="orange",
+                           wraplength=320)
+        msg.pack(anchor="w", padx=4, pady=6)
+
+        def sync_bank(*_a):
+            if bank_menu.get() == "< new >" and not bank_ent.winfo_manager():
+                bank_ent.pack(anchor="w", padx=4, pady=2)
+            elif bank_menu.get() != "< new >" and bank_ent.winfo_manager():
+                bank_ent.pack_forget()
+
+        bank_menu.configure(command=lambda _v: sync_bank())
+
+        def save():
+            bank = bank_var.get().strip() if bank_menu.get() == "< new >" \
+                else bank_menu.get()
+            acct = acct_var.get().strip()
+            if not bank or not acct:
+                msg.configure(text="Bank and account name are required.")
+                return
+            if any(r.get("account") == acct for r in self.cov_lots):
+                msg.configure(text="That account already exists — add rows "
+                                   "to its section instead.")
+                return
+            try:
+                shares = float(shares_var.get())
+                if shares <= 0:
+                    raise ValueError
+            except ValueError:
+                msg.configure(text="Shares must be a positive number.")
+                return
+            if not asset_var.get().strip():
+                msg.configure(text="First-lot asset is required.")
+                return
+            row = {"bank": bank, "account": acct,
+                   "account_type": type_menu.get(),
+                   "asset": asset_var.get().strip(), "shares": shares,
+                   "cost": None, "acquired": "", "sold_date": "",
+                   "sale_price": None,
+                   "_rid": self.cov_next_rid, "_orig": None, "_locked": False}
+            self.cov_next_rid += 1
+            self.cov_lots.append(row)
+            win.destroy()
+            self.build_data_coverage()
+            self._cov_scroll_to_row(row["_rid"])
+            self.status_var.set("Account %s added — fill cost/dates, then "
+                                "Save." % acct)
+
+        ctk.CTkButton(body, text="Create account", command=save).pack(
+            anchor="w", padx=4, pady=8)
+        win.after(50, lambda: (win.deiconify(), win.lift())
+                  if win.winfo_exists() else None)
 
     def _cov_delete(self, rid):
         row = self._cov_row_by_rid(rid)
@@ -1155,14 +1744,22 @@ class App(ctk.CTk):
                 "removed." % (row.get("account"), row.get("asset"),
                                row.get("shares"))):
             return
+        W = self.cov_widgets.pop(rid, {})
+        try:
+            if W.get("frame") is not None and W["frame"].winfo_exists():
+                W["frame"].destroy()
+        except tk.TclError:
+            pass
         self.cov_lots = [r for r in self.cov_lots if r["_rid"] != rid]
-        self.build_data_coverage()
+        self._cov_rebind_nav()
         self._cov_refresh_chrome()
 
     def _cov_toggle_lock(self, rid):
-        self._cov_row_by_rid(rid)["_locked"] = \
-            not self._cov_row_by_rid(rid).get("_locked", True)
-        self.build_data_coverage()
+        row = self._cov_row_by_rid(rid)
+        row["_locked"] = not row.get("_locked", True)
+        self._cov_apply_lock_visual(rid)
+        self._cov_paint_row(rid)
+        self._cov_refresh_chrome()
 
     def _cov_calendar(self, rid, field):
         import calendar as calmod
@@ -1174,9 +1771,9 @@ class App(ctk.CTk):
             cur = datetime.date.fromisoformat(var.get().strip())
         except ValueError:
             cur = datetime.date.today()
-        win = ctk.CTkToplevel(self.data_win)
+        win = ctk.CTkToplevel(self)
         win.title("Pick a date")
-        win.transient(self.data_win)
+        win.transient(self)
         win.resizable(False, False)
         state = {"y": cur.year, "m": cur.month}
         title = ctk.CTkLabel(win, text="", font=ctk.CTkFont(weight="bold"))
@@ -1311,10 +1908,11 @@ class App(ctk.CTk):
             if lot["account"] == account:
                 lot["account_type"] = atype
         if getattr(self, "cov_lots", None) is not None and self._cov_counts():
-            self.status_var.set("Save or Revert coverage edits first.")
-            self.open_data_window()
+            self.status_var.set("Save or Revert Inputs edits first.")
+            self.tabs.set("Data Entry")
+            self.data_tabs.set("Inputs")
             return
-        self.save_lots("Account type updated for %s." % account)
+        self.lots_changed_externally("Account type updated for %s." % account)
 
     # ---- Coverage staged editing: typing NEVER recomputes ----
     def _cov_reset(self):
@@ -1342,31 +1940,6 @@ class App(ctk.CTk):
                    if r["_orig"] is not None}
         deleted = len(self.lots) - len(present)
         return dirty + deleted
-
-    def _close_data_window(self):
-        if self.data_win is None or not self.data_win.winfo_exists():
-            self.data_win = None
-            return
-        n = self._cov_counts()
-        if n:
-            ans = messagebox.askyesnocancel(
-                "Unsaved changes",
-                "%d unsaved change(s). Save before closing?" % n)
-            if ans is None:
-                return
-            if ans and not self._cov_save():
-                return
-        self.data_win.destroy()
-        self.data_win = None
-
-    def refresh_data_window(self):
-        if self.data_win is None or not self.data_win.winfo_exists():
-            return
-        # Builders render from the working copy, so staged keystrokes
-        # survive rebuilds; only Save/Revert replace cov_lots.
-        self.build_data_coverage()
-        self.build_data_template()
-        self.build_data_profile()
 
     def build_data_template(self):
         f = self._clear_data_tab("Template")
@@ -1400,30 +1973,28 @@ class App(ctk.CTk):
         ctk.CTkLabel(f, text="Where each field lives at your broker:",
                      font=ctk.CTkFont(weight="bold")).pack(padx=8, pady=(8, 2),
                                                            anchor="w")
-        scroll = ctk.CTkScrollableFrame(f)
-        scroll.pack(fill="both", expand=True, padx=8, pady=4)
+        # One scrollable text block, not per-cell labels (fast scrolling).
+        guide = ctk.CTkTextbox(f, wrap="word")
+        guide.pack(fill="both", expand=True, padx=8, pady=4)
+        lines = []
         for g in BROKER_GUIDE:
-            ctk.CTkLabel(scroll, text=g["field"],
-                         font=ctk.CTkFont(weight="bold")).pack(
-                             padx=6, anchor="w")
-            ctk.CTkLabel(
-                scroll,
-                text="Concept: %s\nSchwab: %s\nVanguard: %s\nExample: %s" % (
-                    g["concept"], g["schwab"], g["vanguard"], g["example"]),
-                wraplength=1000, anchor="w").pack(padx=18, pady=(0, 8),
-                                                 anchor="w")
-        ctk.CTkLabel(
-            scroll,
-            text="Faster than screenshots: both brokers export these lot "
-                 "tables as CSV — Schwab: Lot Details → Export, and Realized "
-                 "Gain/Loss → Export Lot Details; Vanguard: Export at the "
-                 "top right of the cost basis table. Hand the export to any "
-                 "AI to fill the template, or use Import broker CSV. Other "
-                 "brokers (Wells, Chase, Coinbase, Cash App, Health Equity): "
-                 "same concepts — Holdings/Positions → Cost basis/Lots for "
-                 "open lots; History/Realized gains for closed lots; the "
-                 "year-end 1099-B is the authority for sold lots.",
-            wraplength=1000, anchor="w").pack(padx=6, pady=8, anchor="w")
+            lines.append("%s — %s" % (g["field"], g["concept"]))
+            lines.append("  Schwab: %s" % g["schwab"])
+            lines.append("  Vanguard: %s" % g["vanguard"])
+            lines.append("  Example: %s" % g["example"])
+            lines.append("")
+        lines.append(
+            "Faster than screenshots: both brokers export these lot tables "
+            "as CSV — Schwab: Lot Details → Export, and Realized Gain/Loss "
+            "→ Export Lot Details; Vanguard: Export at the top right of the "
+            "cost basis table. Hand the export to any AI to fill the "
+            "template, or use Import broker CSV. Other brokers (Wells, "
+            "Chase, Coinbase, Cash App, Health Equity): same concepts — "
+            "Holdings/Positions → Cost basis/Lots for open lots; "
+            "History/Realized gains for closed lots; the year-end 1099-B is "
+            "the authority for sold lots.")
+        guide.insert("1.0", "\n".join(lines))
+        guide.configure(state="disabled")
 
     def copy_ai_prompt(self):
         self.clipboard_clear()
@@ -1444,8 +2015,8 @@ class App(ctk.CTk):
         if derrs:
             return "REJECTED — nothing changed:\n%s" % "\n".join(derrs)
         self.lots = merged
-        self.save_lots("Ingested %d row(s) from %s."
-                       % (len(rows), source))
+        self.lots_changed_externally("Ingested %d row(s) from %s."
+                                     % (len(rows), source))
         return None
 
     def paste_rows(self):
@@ -1576,7 +2147,9 @@ class App(ctk.CTk):
                   ("ss_spouse_monthly", "Spouse SS $/mo"),
                   ("other_realized_gains_current_year",
                    "Other realized gains this year $"),
-                  ("other_realized_gains_note", "Note for the above")]
+                  ("other_realized_gains_note", "Note for the above"),
+                  ("home_purchase_price",
+                   "Home purchase price $ (optional — Holdings gain %)")]
         for i, (key, label) in enumerate(fields):
             ctk.CTkLabel(grid, text=label).grid(row=i, column=0, padx=6,
                                                 pady=4, sticky="w")
@@ -1612,6 +2185,10 @@ class App(ctk.CTk):
                 or 0)
             self.profile["other_realized_gains_note"] = \
                 self.prof_entries["other_realized_gains_note"].get().strip()
+            home_raw = self.prof_entries["home_purchase_price"].get().strip()
+            self.profile["home_purchase_price"] = \
+                "" if not home_raw else float(home_raw.replace(",", "")
+                                              .replace("$", ""))
         except ValueError:
             self.status_var.set("Profile not saved — amounts must be numbers.")
             return
@@ -1716,7 +2293,7 @@ class App(ctk.CTk):
                 "shares": shares, "cost": cost, "acquired": acq,
                 "sold_date": "", "sale_price": None})
             win.destroy()
-            self.save_lots("Position added to %s." % acct)
+            self.lots_changed_externally("Position added to %s." % acct)
 
         ctk.CTkButton(body, text="Save", command=save).pack(
             anchor="w", padx=4, pady=8)
@@ -1813,7 +2390,7 @@ class App(ctk.CTk):
                     return
                 self.lots = new_lots
                 win.destroy()
-                self.save_lots("Sold %s of %s (%s)." % (
+                self.lots_changed_externally("Sold %s of %s (%s)." % (
                     pc._fmt_shares(qty), asset, "FIFO"))
                 return
             i = idx[opts.index(menu.get())]
@@ -1837,7 +2414,8 @@ class App(ctk.CTk):
                 self.lots[i] = closed
                 self.lots.insert(i + 1, opened)
             win.destroy()
-            self.save_lots("Sale recorded for %s." % lot["asset"])
+            self.lots_changed_externally("Sale recorded for %s."
+                                         % lot["asset"])
 
         ctk.CTkButton(body, text="Record sale", command=save).pack(
             anchor="w", padx=4, pady=8)
@@ -1859,7 +2437,7 @@ class App(ctk.CTk):
             self.lots[i]["sold_date"] = ""
             self.lots[i]["sale_price"] = None
             win.destroy()
-            self.save_lots("Position reopened.")
+            self.lots_changed_externally("Position reopened.")
 
         ctk.CTkButton(body, text="Reopen", command=save).pack(
             anchor="w", padx=4, pady=8)

@@ -6,16 +6,31 @@ Windows PC.
 
 ## What it shows
 
-- **Accounts** — 13 accounts + home + TOTAL + Mix % (total-net-worth basis)
-- **Liquidity** — before/after 65 + spendability ($135,545/yr before 65;
-  $111,900/yr + SS = $11,837/mo all-in after 65)
-- **Diversification** — vs the 15:15:35:15:20 standard over total net worth
-- **Rebalance** — the 4 Schwab Ashu IRA trades (display only, NEVER executes)
-- **Tax Harvest** — per-lot unrealized P&L with Long/Short holding term,
-  realized gains from closed lots, $15K Medi-Cal gains guardrail + leeway
-- **Charts** (leading tab) — Target vs Actual allocation; Actual vs
-  Standard daily close with Y-axis $2M–$5M and $100K steps (the chart
-  Google Sheets flattened)
+Top-level tabs, in order: **Dashboard, Diversification, Tax Harvest,
+Data Entry.** The ☰ menu holds exactly three items: Refresh stocks,
+Refresh home estimates, Log.
+
+- **Dashboard** — sub-tabs: **Overview** (landing: net worth, spending
+  capacity, key alerts, navigation cards), **Accounts** (bank → account →
+  position quantities, prices, values), **Holdings** (one row per asset
+  aggregated across accounts, weighted avg cost over known-cost lots only,
+  expandable per-account lot detail; home is one more row; cash lives in
+  Liquidity), **Liquidity** (liquid value by bank → account + bank totals,
+  plus spendability: $135,545/yr before 65; $111,900/yr + SS = $11,837/mo
+  all-in after 65), **Tax implications** (per-type tax facts, not advice, +
+  your account→type mapping).
+- **Diversification** — the 15:15:35:15:20 standard + rationale, current
+  position vs standard, allocation chart, rebalance plan (display only —
+  NEVER executes trades), drift chart (Actual vs Standard daily close,
+  Y-axis $2M–$5M, $100K steps — the chart Google Sheets flattened).
+- **Tax Harvest** (view title "Tax Loss Harvesting") — per-lot unrealized
+  P&L with Long/Short holding term, realized gains from closed lots, $15K
+  Medi-Cal gains guardrail + leeway.
+- **Data Entry** (last) — sub-tabs Inputs / Template / Profile (see below).
+
+Deferred: an Overview news feed (earnings, Fed meetings) waits for the
+AI-embedding phase — raw feeds are noisy and curation is the value. No
+placeholder UI.
 
 ## Data model — one row per lot
 
@@ -44,32 +59,36 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
   Social Security (owner + spouse), other realized gains this year + source
   note, and the sheet-ported spending base figures.
 
-## Manage data (☰ menu)
+## Data Entry (last tab)
 
-No new tab — data work lives with the other routine actions. **Manage
-data** opens a full-size window with three sections:
+Sub-tabs Inputs / Template / Profile (reached via the tab or Overview
+cards — the ☰ menu opens no window).
 
-- **Coverage** — Bank → Account → lot grid with an overall progress line.
-  Taxable = REQUIRED, IRA/Roth/HSA = OPTIONAL, Cash = complete. Every field
-  is editable inline (including bank and account, so a misfiled lot moves
-  instead of being re-typed), plus closed lots, per-account type dropdown,
-  per-account **Download template**, and per-account live value (check vs
-  the broker statement). Rows are locked by default; Edit unlocks. Typing
-  stages only — Save validates and commits everything with one recompute,
-  Revert discards, closing with unsaved edits asks Save/Discard/Cancel.
-  Dates are typeable (YYYY-MM-DD) with a picker button beside each; bad
-  cells get a red outline, duplicates a warning, and each row shows live
-  cost/proceeds/gain/term arithmetic. Typing fewer shares is a count
-  correction, never a sale.
+- **Inputs** — Bank → Account → lot grid with an overall progress line.
+  Taxable = REQUIRED, IRA/Roth/HSA = OPTIONAL, Cash = complete. No
+  Bank/Account grid columns (shown in the section header); row Edit reveals
+  bank/account dropdowns so a misfiled lot moves instead of being re-typed.
+  Closed lots listed per account, per-account type dropdown, per-account
+  **Download template**, per-account live value (check vs broker),
+  **+ Add row** inheriting the section, **+ Add account** (existing bank
+  from dropdown or new bank as free text, plus first lot; doubles as the
+  empty-state "Add your first bank / account" prompt). Rows are locked by
+  default; Edit unlocks to a white row with dark text (dirty marker if
+  relocked with unsaved edits). Typing stages only — Tab/Enter/arrows move,
+  Save validates and commits with one recompute, Revert discards. Dates are
+  typeable (YYYY-MM-DD) with a picker button; bad cells get a red outline,
+  duplicates a warning, each row shows live cost/proceeds/gain/term
+  arithmetic. Typing fewer shares is a count correction, never a sale.
+  Edit/Lock/Save update rows in place (scroll preserved; only Add scrolls).
 - **Template** — **Download full template** (header only), **Upload**,
   **Paste rows** (clipboard TSV/CSV), **Import broker CSV** (template-shaped
   exports import; anything else is plainly rejected, never guessed), and
   **Copy AI prompt** (ready-made screenshot-to-CSV prompt for any AI). The
   tab also carries a per-field broker guide (Schwab + Vanguard paths,
-  CSV-export pointers, 1099-B note).
-- **Profile** — date of birth, SS amounts, other gains + note (all editable,
-  so a wrong seed is fixable in place). Shows live spending capacity:
-  before-65 $/yr, after-65 base + SS = all-in $/yr.
+  CSV-export pointers, 1099-B note) as one fast-scrolling text block.
+- **Profile** — date of birth, SS amounts, other gains + note, optional home
+  purchase price (all editable, so a wrong seed is fixable in place). Shows
+  live spending capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.
 - **Feed one account** — guided mode: one taxable account at a time with
   its broker guidance and a "N required positions to go" countdown, then
   the next. The full grid stays available.
@@ -95,18 +114,19 @@ data** opens a full-size window with three sections:
    pip install -r requirements.txt
    python portfolio_app.py
    ```
-3. Open the ☰ menu (top right) and press **Refresh prices**
+3. Open the ☰ menu (top right) and press **Refresh stocks**
    (Yahoo Finance). If the network fails, the app shows last-known
    prices from `prices_cache.json` and never crashes.
 
 ## Daily use
 
-- **Buy/sell**: use the Accounts tab buttons (Add / Sell / Close), or fill
-  a template in the Data window and upload it. Then Refresh prices.
-- **Home value**: open the ☰ menu, type a new Zillow value, press Apply home.
-- **Log today's close** (☰ menu): appends today's row to `drift_log.csv`
+- **Buy/sell**: use the Accounts tab buttons (Add / Sell / Close), edit the
+  Inputs grid, or fill a template and upload it. Then ☰ → Refresh stocks.
+- **Home value**: ☰ → Refresh home estimates (prefilled prompt; no Zillow
+  scraper — automatic fetching only if a reliable estimate API appears).
+- **Log** (☰ menu): appends today's close to `drift_log.csv`
   (skips weekends, like the old daily cron). Upserts if run twice.
-- **Cost basis**: fill cost + acquired date per lot (Data window or
+- **Cost basis**: fill cost + acquired date per lot (Inputs grid or
   template) to activate P&L, holding terms, and harvest rankings. Never
   invent basis — leave blank until you pull it from the broker.
 - **Migration note (2026-11-02)**: `holdings.yaml` + `cost_basis.csv` were
