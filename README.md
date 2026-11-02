@@ -29,6 +29,13 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
   both filled. Status is DERIVED from the dates — there is no status column.
 - **Partial sale = two rows** (closed sold quantity + open remainder); the
   Sell action splits automatically, never by hand.
+- **Lot key = account + asset + acquired_date + cost_per_share.** Uploads
+  upsert on that key (match → update, no match → insert) and NEVER delete
+  rows. Two open rows sharing a key are rejected as duplicates. New dated
+  lots draw down the dateless (unattributed) balance for that asset,
+  keeping a residual row; dated shares beyond the balance are rejected —
+  nothing is ever silently dropped or double-counted. Correct a lot's date
+  in the grid (net-change, no false draw); uploads only add or update.
 - `account_type`: `Traditional IRA`, `Roth IRA`, `Taxable`, `HSA`, `Cash`.
   Cash rows (`CASH_USD`, savings) need no cost or dates.
 - **Share edits are count CORRECTIONS, not sales** — no tax event. A sale
@@ -42,26 +49,41 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
 No new tab — data work lives with the other routine actions. **Manage
 data** opens a full-size window with three sections:
 
-- **Coverage** — Bank → Account → position checklist (Shares ✓/✗, Cost
-  ✓/✗, Acquired ✓/✗) with an overall progress line. Taxable = REQUIRED,
-  IRA/Roth/HSA = OPTIONAL, Cash = complete. Per-account type dropdown to
-  correct the type, and per-account **Download template**.
-- **Template** — **Download full template** (header row only) or upload a
-  filled one. Uploads validate FIRST (bad numbers/dates, sold-without-price,
-  type conflicts) and change nothing on failure; on success they MERGE by
-  account+asset, leaving every other position untouched. Fill it yourself,
-  or paste broker screenshots into ChatGPT, Muse, Gemini, or any AI and ask
-  it to fill the template, then upload here.
-- **Profile** — date of birth, SS amounts, other gains + note. Shows live
-  spending capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.
+- **Coverage** — Bank → Account → lot grid with an overall progress line.
+  Taxable = REQUIRED, IRA/Roth/HSA = OPTIONAL, Cash = complete. Every field
+  is editable inline (including bank and account, so a misfiled lot moves
+  instead of being re-typed), plus closed lots, per-account type dropdown,
+  per-account **Download template**, and per-account live value (check vs
+  the broker statement). Rows are locked by default; Edit unlocks. Typing
+  stages only — Save validates and commits everything with one recompute,
+  Revert discards, closing with unsaved edits asks Save/Discard/Cancel.
+  Dates are typeable (YYYY-MM-DD) with a picker button beside each; bad
+  cells get a red outline, duplicates a warning, and each row shows live
+  cost/proceeds/gain/term arithmetic. Typing fewer shares is a count
+  correction, never a sale.
+- **Template** — **Download full template** (header only), **Upload**,
+  **Paste rows** (clipboard TSV/CSV), **Import broker CSV** (template-shaped
+  exports import; anything else is plainly rejected, never guessed), and
+  **Copy AI prompt** (ready-made screenshot-to-CSV prompt for any AI). The
+  tab also carries a per-field broker guide (Schwab + Vanguard paths,
+  CSV-export pointers, 1099-B note).
+- **Profile** — date of birth, SS amounts, other gains + note (all editable,
+  so a wrong seed is fixable in place). Shows live spending capacity:
+  before-65 $/yr, after-65 base + SS = all-in $/yr.
+- **Feed one account** — guided mode: one taxable account at a time with
+  its broker guidance and a "N required positions to go" countdown, then
+  the next. The full grid stays available.
 
-## Position lifecycle (Accounts tab buttons)
+## Position lifecycle (Accounts tab buttons + Coverage grid)
 
 - **Add position** — bank, account (existing or new + type), asset, shares,
   optional cost + acquired date.
-- **Sell / Reduce** — quantity + date + price; auto-splits the lot.
+- **Sell / Reduce** — FIFO by default (oldest lots first, dateless last,
+  one closed row per lot consumed), specific-lot override available.
 - **Close position** — sell-all; the row leaves holdings, enters realized
-  gains. **Reopen** clears the sold fields.
+  gains. **Reopen** clears the sold fields (also possible inline).
+- **Delete lot** — per-row, with confirmation; the only way rows disappear
+  (uploads never delete).
 - Selling without a cost on file records the gain as **unknown** — the app
   never invents basis.
 

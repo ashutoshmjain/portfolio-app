@@ -752,6 +752,24 @@ def validate_lot_rows(rows, existing=None, today=None):
         if len(ts) > 1:
             errors.append("account %r has conflicting types in upload: %s"
                           % (acct, sorted(ts)))
+    seen = {}
+    for lino, r in enumerate(rows, start=2):
+        try:
+            key = lot_key_of(r.get("account"), r.get("asset"),
+                             r.get("acquired_date"), r.get("cost_per_share"))
+        except Exception:  # noqa: BLE001 - malformed cells already errored
+            continue
+        # Closed rows are history and may share a key with their open
+        # residual (a normal post-split state); only two OPEN rows sharing
+        # a key are ambiguous and must be combined.
+        if _s(r.get("sold_date")):
+            continue
+        if key in seen:
+            errors.append("line %d duplicates line %d (same account, asset, "
+                          "acquired date and cost) — combine them first"
+                          % (lino, seen[key]))
+        else:
+            seen[key] = lino
     if existing:
         known_types = {}
         for lot in existing:
@@ -766,27 +784,153 @@ def validate_lot_rows(rows, existing=None, today=None):
     return errors
 
 
+def lot_key_of(account, asset, acquired, cost):
+    """Lot identity: (account, asset, acquired_date, cost_per_share).
+    Cost normalizes so 10 and 10.0 are the same key."""
+    try:
+        cost = None if cost is None or str(cost).strip() == "" \
+            else float(cost)
+    except (ValueError, TypeError):
+        cost = str(cost)
+    return (_s(account), _s(asset), _s(acquired), cost)
+
+
+def lot_key(lot):
+    return lot_key_of(lot.get("account"), lot.get("asset"),
+                      lot.get("acquired"), lot.get("cost"))
+
+
+def row_to_lot(r):
+    return {
+        "bank": _s(r.get("bank")),
+        "account": _s(r.get("account")),
+        "account_type": _s(r.get("account_type")),
+        "asset": _s(r.get("asset")),
+        "shares": _fnum(r.get("shares")),
+        "cost": _fnum(r.get("cost_per_share")),
+        "acquired": _s(r.get("acquired_date")),
+        "sold_date": _s(r.get("sold_date")),
+        "sale_price": _fnum(r.get("sale_price_per_share")),
+    }
+
+
 def merge_lots(existing, uploaded_rows):
-    """Merge validated upload rows into existing lots. Rows are keyed by
-    (account, asset): any uploaded key REPLACES that position's stored rows
-    (so re-uploading an account's template just works, including splits);
-    every other position is left untouched. Never replaces the whole file."""
-    keys = {(_s(r.get("account")), _s(r.get("asset"))) for r in uploaded_rows}
-    merged = [l for l in existing
-              if (l.get("account"), l.get("asset")) not in keys]
+    """Lot-key UPSERT into a new list; inputs untouched. A matching
+    (account, asset, acquired_date, cost_per_share) key replaces the
+    mutable fields (shares, sold_date, sale_price, bank, account_type);
+    anything else inserts. NEVER deletes rows — deletions happen only via
+    the Delete-lot action. Returns (merged, inserted_keys)."""
+    merged = [dict(l) for l in existing]
+    index = {}
+    for l in merged:
+        index[lot_key(l)] = l
+    inserted = []
     for r in uploaded_rows:
-        merged.append({
-            "bank": _s(r.get("bank")),
-            "account": _s(r.get("account")),
-            "account_type": _s(r.get("account_type")),
-            "asset": _s(r.get("asset")),
-            "shares": _fnum(r.get("shares")),
-            "cost": _fnum(r.get("cost_per_share")),
-            "acquired": _s(r.get("acquired_date")),
-            "sold_date": _s(r.get("sold_date")),
-            "sale_price": _fnum(r.get("sale_price_per_share")),
-        })
-    return merged
+        new = row_to_lot(r)
+        key = lot_key(new)
+        if key in index:
+            old = index[key]
+            old.update({k: new[k] for k in
+                        ("bank", "account_type", "shares", "sold_date",
+                         "sale_price")})
+        else:
+            merged.append(new)
+            index[key] = new
+            inserted.append(key)
+    return merged, inserted
+
+
+def drawdown_dated(merged, inserted_keys):
+    """Draw newly attributed dated lots out of the dateless (unattributed)
+    balance for the same (account, asset): dateless open rows are reduced
+    in file order and zeroed ones dropped, keeping a positive residual row.
+    Returns [errors] (dated shares exceeding the balance); mutates `merged`
+    only on the success path — callers must discard it when errors occur.
+
+    `inserted_keys` are lot keys absent before this upload, so a
+    re-uploaded dated lot never draws twice."""
+    need = {}
+    for key in inserted_keys:
+        acct, asset, acquired, _cost = key
+        if not acquired or asset == CASH_ASSET:
+            continue
+        lot = next((l for l in merged if lot_key(l) == key), None)
+        if lot is not None and lot_status(lot) == "Open":
+            need[(acct, asset)] = need.get((acct, asset), 0.0) + \
+                (lot["shares"] or 0.0)
+    return drawdown_amounts(merged, need, exclude_keys=set(inserted_keys))
+
+
+def dated_totals(lots):
+    """{(account, asset): dated non-cash shares, open AND closed}.
+    Closing/reopening a dated row must not look like attribution growth."""
+    totals = {}
+    for lot in lots:
+        if lot.get("acquired") and lot.get("asset") != CASH_ASSET:
+            key = (lot.get("account"), lot.get("asset"))
+            totals[key] = totals.get(key, 0.0) + (lot["shares"] or 0.0)
+    return totals
+
+
+def undated_totals(lots):
+    """{(account, asset): dateless non-cash shares, open AND closed} —
+    the unattributed balance. The drawdown pool itself stays open-only
+    (sold unattributed shares cannot fund new attribution)."""
+    totals = {}
+    for lot in lots:
+        if not lot.get("acquired") and lot.get("asset") != CASH_ASSET \
+                and lot.get("account_type") != "Cash":
+            key = (lot.get("account"), lot.get("asset"))
+            totals[key] = totals.get(key, 0.0) + (lot["shares"] or 0.0)
+    return totals
+
+
+def drawdown_amounts(merged, needs, exclude_keys=()):
+    """Draw explicit {((account, asset)): shares} needs out of the dateless
+    balance, as drawdown_dated. Used by grid saves, where a row gaining a
+    date converts its own shares (net-change need) instead of drawing."""
+    errors = []
+    excluded = set(exclude_keys)
+    for (acct, asset), qty in needs.items():
+        if qty <= 1e-9:
+            continue
+        pool = [l for l in merged
+                if lot_status(l) == "Open" and not l.get("acquired")
+                and l.get("asset") == asset and l.get("account") == acct
+                and l.get("account_type") != "Cash"
+                and lot_key(l) not in excluded]
+        balance = sum(l["shares"] or 0.0 for l in pool)
+        if qty - balance > 1e-9:
+            errors.append(
+                "%s / %s: dated lots total %s shares but the unattributed "
+                "(dateless) balance is only %s — excess shares rejected" % (
+                    acct, asset, _fmt_shares(qty), _fmt_shares(balance)))
+            continue
+        left = qty
+        for l in pool:
+            if left <= 1e-9:
+                break
+            take = min(l["shares"] or 0.0, left)
+            l["shares"] = (l["shares"] or 0.0) - take
+            left -= take
+        for l in [l for l in pool if (l["shares"] or 0.0) <= 1e-9]:
+            merged.remove(l)
+    return errors
+
+
+def _fmt_shares(x):
+    return ("%g" % x)
+
+
+def merge_upload(existing, uploaded_rows):
+    """Atomic upload merge: lot-key upsert + dateless drawdown on a copy.
+    Returns (merged_or_None, inserted, errors) — on errors NOTHING commits,
+    so callers assign only when errors is empty."""
+    merged, inserted = merge_lots(existing, uploaded_rows)
+    errors = drawdown_dated(merged, inserted)
+    if errors:
+        return None, [], errors
+    return merged, inserted, []
 
 
 def split_for_sale(lot, qty, sold_date, sale_price, cost=None):
@@ -798,6 +942,52 @@ def split_for_sale(lot, qty, sold_date, sale_price, cost=None):
     open_row = dict(lot, shares=(lot["shares"] or 0.0) - qty,
                     sold_date="", sale_price=None)
     return closed, open_row
+
+
+def fifo_order(lots):
+    """Open lots oldest-first by acquired_date; dateless lots sort last
+    (stable otherwise)."""
+    return sorted(open_lots(lots),
+                  key=lambda l: (not l.get("acquired"), l.get("acquired")))
+
+
+def fifo_sell(lots, account, asset, qty, sold_date, sale_price, cost=None):
+    """Sell `qty` shares of one position FIFO: oldest lots first, dateless
+    last, auto-spanning via split_for_sale. Creates one closed row per lot
+    consumed, each carrying the sale date and price. Lots missing a cost
+    take `cost` when given, else stay unknown (never invented).
+    Returns (new_lots, error_or_None) — new_lots is a copy; on error the
+    caller's list is untouched."""
+    if qty is None or qty <= 0:
+        return lots, "quantity must be positive"
+    cands = [l for l in fifo_order(lots)
+             if l.get("account") == account and l.get("asset") == asset
+             and not is_cash_row(l)]
+    held = sum(l["shares"] or 0.0 for l in cands)
+    if qty - held > 1e-9:
+        return lots, "only %s shares held, cannot sell %s" % (
+            _fmt_shares(held), _fmt_shares(qty))
+    new_lots = [dict(l) for l in lots]
+    by_id = {id(l): n for l, n in zip(lots, new_lots)}
+    left = qty
+    for cand in cands:
+        if left <= 1e-9:
+            break
+        mine = by_id[id(cand)]
+        take = min(mine["shares"] or 0.0, left)
+        if take < (mine["shares"] or 0.0) - 1e-9:
+            closed, opened = split_for_sale(mine, take, sold_date,
+                                            sale_price, cost)
+            at = new_lots.index(mine)
+            new_lots[at] = closed
+            new_lots.insert(at + 1, opened)
+        else:
+            mine["sold_date"] = sold_date
+            mine["sale_price"] = sale_price
+            if cost is not None and mine.get("cost") is None:
+                mine["cost"] = cost
+        left -= take
+    return new_lots, None
 
 
 # ================= profile (profile.json) =================
