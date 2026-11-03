@@ -43,6 +43,17 @@ Deferred: an Overview news feed (earnings, Fed meetings) waits for the
 AI-embedding phase — raw feeds are noisy and curation is the value. No
 placeholder UI.
 
+## Copying out of the app (Ctrl+C, tables, AI)
+
+- Click any text, then press **Ctrl+C** — entries keep native selection
+  copy; readout labels copy their text; anything inside a table copies the
+  whole table. The top bar confirms each copy.
+- Every table has a **Copy table** button (top right of the table): TSV to
+  the clipboard, pasting straight into Excel, Sheets, or any AI chat.
+- Instruction blocks (Inputs guide, Template guide, Diversification
+  standard) are real selectable text: drag to select, Ctrl+C to copy.
+- Counts use plain plurals ("1 row", "11 positions") — no "(s)" anywhere.
+
 ## Readability (older eyes, split screen)
 
 - Type scale lives in one place (`FS_BODY` / `FS_HEAD` / `FS_TITLE` /
@@ -55,9 +66,15 @@ placeholder UI.
 - Dark theme kept; body text is always light, secondary rows use a readable
   light grey (`CLR_SECONDARY`) — never tiny + dim. Tables use generous row
   padding; charts are dark-dressed with scaled-up titles/labels/legends.
+  The drift chart labels every $500K with $100K minor gridlines (31 labels
+  crowded the edge and stole a third of the plot).
 - Split-screen safe: every tab is verified at 960px window width — no
   clipped text, no unreachable buttons, no horizontal overflow. Charts
-  track the container width and shrink to fit.
+  track the container width and shrink to fit; Overview and
+  Diversification scroll vertically as one region each, so tall figures
+  are never cropped by a short window (that clipping once ate x-labels,
+  legends, and whole bar groups). Long labels wrap at 860px; the Overview
+  nav cards sit 4-across in a grid.
 
 ## Data model — one row per lot
 

@@ -515,15 +515,20 @@ def make_drift_chart(fig, log_rows):
     ax.plot(dates, standard, label="Standard total $", color="#EA4335",
             linewidth=2)
     ax.set_ylim(2000000, 5000000)
-    ax.set_yticks(range(2000000, 5000001, 100000))
+    # The $100K steps stay on the axis as minor gridlines; labels every
+    # $500K — 31 labels crowded the plot edge and stole a third of the
+    # chart width at 16px body text.
+    ax.set_yticks(range(2000000, 5000001, 500000))
+    ax.set_yticks(range(2000000, 5000001, 100000), minor=True)
     ax.set_yticklabels(["$%.1fM" % (v / 1e6)
-                        for v in range(2000000, 5000001, 100000)],
-                       fontsize=9)
+                        for v in range(2000000, 5000001, 500000)],
+                       fontsize=10)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d, %Y"))
     fig.autofmt_xdate(rotation=30)
     ax.set_title("Actual vs Standard -- daily close (total net worth)")
     ax.legend(loc="lower left")
-    ax.grid(True, alpha=0.3)
+    ax.grid(True, which="major", alpha=0.35)
+    ax.grid(True, which="minor", alpha=0.12)
     _darken_chart(fig, ax)
     fig.tight_layout()
     return ax

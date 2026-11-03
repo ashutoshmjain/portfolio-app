@@ -31,6 +31,11 @@ DRIFT_LOG = os.path.join(HERE, "drift_log.csv")
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+def _n(n, one, many=None):
+    """Plain plurals for UI strings: '1 row' vs '3 rows' — no '(s)'."""
+    return "%d %s" % (n, one if n == 1 else (many or one + "s"))
+
+
 # ---- app-wide type scale: ONE place, not scattered per-widget values ----
 # Retirement-planner audience skews older: body text >= 15px everywhere,
 # headings a few px above body, bold table headers >= 15px. Widgets without
@@ -137,16 +142,28 @@ def pct(x):
 
 
 class Table(ctk.CTkScrollableFrame):
-    """Simple grid table: header row bold, values as labels."""
+    """Simple grid table: header row bold, values as labels.
+
+    Every table carries a Copy button (header toolbar, above the grid so
+    it never widens the columns): TSV to the clipboard, pasting straight
+    into Excel, Sheets, or any AI chat. Ctrl+C with the table focused
+    (click its Copy button first) copies the same TSV.
+    """
 
     def __init__(self, master, headers, rows, col_widths=None, **kw):
         super().__init__(master, **kw)
-        self.headers = headers
+        self.headers = list(headers)
+        self._rows = [list(r) for r in rows]
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.grid(row=0, column=0, columnspan=len(headers), sticky="e",
+                 padx=4, pady=(2, 0))
+        ctk.CTkButton(bar, text="Copy table", width=96,
+                      command=self.copy_to_clipboard).pack(side="right")
         for j, h in enumerate(headers):
             lbl = ctk.CTkLabel(self, text=h, font=ctk.CTkFont(weight="bold"),
                                anchor="w")
-            lbl.grid(row=0, column=j, padx=4, pady=3, sticky="w")
-        for i, row in enumerate(rows, start=1):
+            lbl.grid(row=1, column=j, padx=4, pady=3, sticky="w")
+        for i, row in enumerate(rows, start=2):
             for j, val in enumerate(row):
                 bold = str(val).startswith("**")
                 text = str(val).replace("**", "")
@@ -155,6 +172,25 @@ class Table(ctk.CTkScrollableFrame):
                     font=ctk.CTkFont(weight="bold") if bold else None,
                     anchor="w")
                 lbl.grid(row=i, column=j, padx=4, pady=3, sticky="w")
+
+    def copy_to_clipboard(self):
+        lines = ["\t".join(str(h) for h in self.headers)]
+        for row in self._rows:
+            lines.append("\t".join(str(v).replace("**", "") for v in row))
+        top = self.winfo_toplevel()
+        try:
+            top.clipboard_clear()
+            top.clipboard_append("\n".join(lines))
+            top.update()
+        except tk.TclError:
+            return False
+        try:
+            top.status_var.set(
+                "Copied %s — paste into Excel, Sheets, or any AI."
+                % _n(len(self._rows), "row"))
+        except (tk.TclError, AttributeError):
+            pass
+        return True
 
 
 class App(ctk.CTk):
@@ -189,6 +225,11 @@ class App(ctk.CTk):
         self.status.pack(side="left", padx=8)
         self.menu_win = None
         self.bind_all("<MouseWheel>", self._wheel_scroll, add="+")
+        # Standard Windows copy: click any text to focus it, Ctrl+C copies.
+        # Entries/text boxes keep native selection copy; labels copy their
+        # text; anything inside a Table copies the whole table as TSV.
+        self.bind_all("<Button-1>", self._focus_for_copy, add="+")
+        self.bind_all("<Control-c>", self._copy_hotkey, add="+")
 
         # ---- Tabs ----
         # Top level: Dashboard, Diversification, Tax Harvest, Data Entry.
@@ -430,12 +471,129 @@ class App(ctk.CTk):
                     pass
                 return "break"
             if isinstance(w, ctk.CTkScrollableFrame):
+                # Nested scroll regions (a table inside a scrolling tab):
+                # scroll the innermost one that still has room; when it is
+                # already at its limit in this direction, fall through to
+                # the outer region instead of swallowing the notch.
                 try:
-                    w._parent_canvas.yview_scroll(-5 * steps, "units")
+                    cv = w._parent_canvas
+                    lo, hi = cv.yview()
+                    at_top = lo <= 0.0 and steps > 0
+                    at_bottom = hi >= 1.0 and steps < 0
+                    if not (at_top or at_bottom):
+                        cv.yview_scroll(-5 * steps, "units")
+                        return "break"
                 except (tk.TclError, AttributeError):
-                    pass
-                return "break"
+                    return "break"
             w = w.master
+
+    def _focus_for_copy(self, event):
+        # Clicking a readout label focuses it so Ctrl+C can copy it.
+        # Buttons, entries and menus keep their native click behavior.
+        # NOTE: CTkLabel is a frame wrapping an inner tk.Label — a click
+        # lands on the inner widget, so both types are accepted.
+        try:
+            w = event.widget
+        except AttributeError:
+            return None
+        if isinstance(w, (ctk.CTkLabel, tk.Label)):
+            try:
+                if w.cget("text"):
+                    w.focus_set()
+            except tk.TclError:
+                pass
+        return None
+
+    def _copy_hotkey(self, event=None):
+        # Ctrl+C across the app. Native selection in entries/text boxes
+        # wins (class binding already copied); otherwise copy the focused
+        # label's text, or the enclosing Table as TSV. Plain-text
+        # clipboard: pastes straight into Excel, Sheets, or any AI chat.
+        try:
+            w = self.focus_get()
+        except tk.TclError:
+            return None
+        if w is not None:
+            try:
+                if w.selection_present():
+                    return None
+            except (tk.TclError, AttributeError):
+                pass
+            try:
+                if w.tag_ranges("sel"):
+                    return None
+            except (tk.TclError, AttributeError):
+                pass
+            if isinstance(w, (ctk.CTkLabel, tk.Label)):
+                try:
+                    text = w.cget("text")
+                except tk.TclError:
+                    text = ""
+                if text:
+                    self._to_clipboard(text, "Copied text — paste anywhere.")
+                    return "break"
+            t = w
+            while t is not None and t is not self:
+                if isinstance(t, Table):
+                    t.copy_to_clipboard()
+                    return "break"
+                t = t.master
+        return None
+
+    def _to_clipboard(self, text, msg=None):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self.update()
+        except tk.TclError:
+            return False
+        if msg:
+            self.status_var.set(msg)
+        return True
+
+    def _selectable_note(self, parent, text, bg="#2B2B2B", **pack_kw):
+        """Read-only, mouse-selectable text block (real selection + Ctrl+C).
+
+        A borderless tk.Text that auto-heights to its wrapped lines and
+        refits on resize. Typing/paste/cut are blocked; navigation,
+        selection and Control shortcuts (copy, select-all) work.
+        """
+        # width=20: wrapping (not requested width) decides the layout, so
+        # this block can never widen a split-screen interior itself.
+        box = tk.Text(parent, wrap="word", width=20, height=2, relief="flat",
+                      borderwidth=0, highlightthickness=0, bg=bg,
+                      fg="#EDEDED", cursor="xterm",
+                      font=("Roboto", -FS_BODY), spacing1=2, spacing3=4,
+                      insertbackground="#EDEDED")
+        box.insert("1.0", text)
+
+        def _ro_key(e):
+            if e.state & 0x4:  # Control held: copy, select-all, etc.
+                return None
+            if e.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
+                            "Prior", "Next"):
+                return None
+            return "break"
+
+        box.bind("<KeyPress>", _ro_key, add="+")
+        for seq in ("<<Cut>>", "<<Paste>>"):
+            box.bind(seq, lambda e: "break", add="+")
+
+        def _fit(_e=None):
+            try:
+                n = box.count("1.0", "end", "displaylines")
+                h = max(1, (n[0] if n else 1))
+                if int(box.cget("height")) != h:
+                    box.configure(height=h)
+            except tk.TclError:
+                pass
+
+        box.bind("<Configure>", _fit, add="+")
+        if not pack_kw:
+            pack_kw = {"padx": 8, "pady": 4, "anchor": "w", "fill": "x"}
+        box.pack(**pack_kw)
+        box.after_idle(_fit)
+        return box
 
     def _required_missing(self):
         return sum(
@@ -444,13 +602,16 @@ class App(ctk.CTk):
             and lot.get("asset") != pc.CASH_ASSET
             and (lot.get("cost") is None or not lot.get("acquired")))
 
-    def _chart_canvas(self, master, fig, aspect=0.46, min_h=300):
-        """Embed a matplotlib figure that tracks its container's width.
+    def _chart_canvas(self, master, fig):
+        """Embed a matplotlib figure that tracks its container's WIDTH.
 
-        Split-screen safety: at ~960px window width a fixed 1000px figure
-        would clip. On <Configure> (settled by a 20px threshold) the figure
-        is resized to the widget width and redrawn; draw_idle emits no
-        further Configure, so this converges after one step.
+        Height is fixed by the caller's figsize and the tab body scrolls
+        vertically — so a tall figure is never cropped by a short window
+        (sizing height from width grew figures past their allocation and
+        cut off x-labels, legends and whole bar groups). Width tracking
+        keeps split-screen (960px) free of horizontal overflow. On
+        <Configure> (20px debounce) the figure width follows the widget;
+        draw_idle emits no further Configure, so this converges.
         """
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         canvas = FigureCanvasTkAgg(fig, master=master)
@@ -468,9 +629,14 @@ class App(ctk.CTk):
             state["w"] = w
             try:
                 fig.set_size_inches(w / fig.get_dpi(),
-                                    max(min_h, w * aspect) / fig.get_dpi(),
+                                    fig.get_size_inches()[1],
                                     forward=True)
                 fig.tight_layout()
+                # The Tk canvas keeps its creation-time requested size
+                # (1000px): without this the scrollable interior stays
+                # 1000+ wide and the audit (rightly) reports overflow.
+                fw, fh = fig.get_size_inches() * fig.get_dpi()
+                widget.configure(width=int(fw), height=int(fh))
             except (ValueError, tk.TclError):
                 pass
             canvas.draw_idle()
@@ -480,6 +646,11 @@ class App(ctk.CTk):
 
     def build_overview(self):
         f = self._clear_dash("Overview")
+        # One vertical scroll region for the whole view: the chart keeps
+        # its full figure height at any window size instead of being
+        # cropped by a short window (lost x-labels, legends, bar groups).
+        body = ctk.CTkScrollableFrame(f)
+        body.pack(fill="both", expand=True)
         tnw = self.data["tnw"]
         sp = pc.spending_capacity(self.profile)
         d = self.data["drift"]
@@ -489,11 +660,11 @@ class App(ctk.CTk):
             self.profile.get("other_realized_gains_current_year", 0) or 0.0)
         leeway = pc.TLH_CAP - realized
         missing = self._required_missing()
-        ctk.CTkLabel(f, text="Total net worth: %s" % money(tnw),
+        ctk.CTkLabel(body, text="Total net worth: %s" % money(tnw),
                      font=ctk.CTkFont(size=FS_TITLE, weight="bold")).pack(
                          padx=10, pady=(10, 2), anchor="w")
         ctk.CTkLabel(
-            f, text="Allowed spending: %s/yr before 65 · %s/yr after 65 "
+            body, text="Allowed spending: %s/yr before 65 · %s/yr after 65 "
                     "(base %s + Social Security)." % (
                         money(sp["before65"]), money(sp["after65_allin"]),
                         money(sp["after65_base"])),
@@ -503,12 +674,13 @@ class App(ctk.CTk):
                 pct(d["actual_ytd"]), pct(d["standard_ytd"]),
                 pct(d["drift_pp"])),
             "Tax-loss-harvest leeway: %s of the $15,000 cap." % money(leeway),
-            "%d REQUIRED position(s) still missing cost/dates — feed them "
-            "in Data Entry." % missing if missing else
+            "%d REQUIRED position%s still missing cost or dates — feed "
+            "them in Data Entry." % (missing, "" if missing == 1 else "s")
+            if missing else
             "All REQUIRED positions have cost and dates.",
         ]
         for alert in alerts:
-            ctk.CTkLabel(f, text="• " + alert, wraplength=1100,
+            ctk.CTkLabel(body, text="• " + alert, wraplength=860,
                          anchor="w").pack(padx=10, pady=1, anchor="w")
         # Primary visual: the Actual-vs-Standard daily-close LINE chart —
         # the same shared implementation (and values) as Diversification.
@@ -516,24 +688,27 @@ class App(ctk.CTk):
         from matplotlib.figure import Figure
         fig = Figure(figsize=(10, 4.6), dpi=100)
         pc.make_drift_chart(fig, pc.load_drift_log(DRIFT_LOG))
-        self._chart_canvas(f, fig)
-        ctk.CTkLabel(f, text="Go to:",
+        self._chart_canvas(body, fig)
+        ctk.CTkLabel(body, text="Go to:",
                      font=ctk.CTkFont(weight="bold")).pack(padx=10,
                                                            pady=(10, 2),
                                                            anchor="w")
-        cards = ctk.CTkFrame(f, fg_color="transparent")
+        cards = ctk.CTkFrame(body, fg_color="transparent")
         cards.pack(fill="x", padx=10, pady=4)
-        for label, top, sub in (
+        # Grid (4 across), not one packed row: 7 × 150px buttons overflow
+        # a 960px split-screen window.
+        for i, (label, top, sub) in enumerate((
                 ("Diversification", "Diversification", None),
                 ("Tax Harvest", "Tax Harvest", None),
                 ("Data Entry", "Data Entry", None),
                 ("Accounts", "Dashboard", "Accounts"),
                 ("Holdings", "Dashboard", "Holdings"),
                 ("Liquidity", "Dashboard", "Liquidity"),
-                ("Tax implications", "Dashboard", "Tax implications")):
+                ("Tax implications", "Dashboard", "Tax implications"))):
             ctk.CTkButton(cards, text=label, width=150,
-                          command=lambda t=top, s=sub: self._goto(t, s)).pack(
-                              side="left", padx=4, pady=4)
+                          command=lambda t=top, s=sub: self._goto(t, s)).grid(
+                              row=i // 4, column=i % 4, padx=4, pady=4,
+                              sticky="w")
 
     def _hold_avg_text(self, avg, missing):
         if avg is None:
@@ -574,7 +749,7 @@ class App(ctk.CTk):
                     "Liquidity. Home is one more row (value only unless a "
                     "purchase price is set in the profile). Click ▶ on a row "
                     "for its per-account breakdown.",
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+            wraplength=860, anchor="w").pack(padx=6, pady=6, anchor="w")
 
     def _hold_row(self, scroll, r):
         box = ctk.CTkFrame(scroll)
@@ -763,14 +938,14 @@ class App(ctk.CTk):
                        money(self.home_value), money(self.data["tnw"]),
                        money(sp["before65"]),
                        "--" if years is None else "%.1f" % years),
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+            wraplength=860, anchor="w").pack(padx=6, pady=6, anchor="w")
         ctk.CTkLabel(
             f, text="59½ (%s): penalty-free ≠ tax-free — Traditional "
                     "withdrawals are still taxed as income; Roth earnings "
                     "also need the 5-year rule (Roth balance here is "
                     "negligible)."
                     % pc.fifty_nine_half(self.profile.get("date_of_birth")),
-            wraplength=1100, anchor="w").pack(padx=6, pady=(0, 6), anchor="w")
+            wraplength=860, anchor="w").pack(padx=6, pady=(0, 6), anchor="w")
 
     def _liq_toggle(self, norm):
         if norm in self._liq_expanded:
@@ -807,7 +982,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             f, text="What each account type means for tax and withdrawals "
                     "(facts, not advice).",
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+            wraplength=860, anchor="w").pack(padx=6, pady=6, anchor="w")
         Table(f, ["Account type", "Tax / withdrawal treatment"],
               [["**" + t, self.TAX_TYPE_NOTES[t]] for t in
                ("Traditional IRA", "Roth IRA", "Taxable", "HSA", "Cash")]
@@ -823,15 +998,21 @@ class App(ctk.CTk):
     def build_diversification(self):
         from matplotlib.figure import Figure
         f = self._clear("Diversification")
-        ctk.CTkLabel(
-            f, text="The standard — 15:15:35:15:20 over total net worth. "
-                    "BTC 15% (asymmetric upside, not maxi: 9% spot/ETF + 6% "
-                    "MSTR) · Gold 15% (structural hedge against technology) "
-                    "· Equities 35% (growth engine) · Cash 15% (buffer, "
-                    "incl. 20% STRC) · RE 20% (home anchor). NOTE: STRC is "
-                    "BTC-correlated preferred, so effective BTC exposure "
-                    "runs ~2–3pp above stated.",
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+        # One vertical scroll region: tables + both charts keep full height
+        # at any window size instead of being cropped (see build_overview).
+        body = ctk.CTkScrollableFrame(f)
+        body.pack(fill="both", expand=True)
+        self._selectable_note(
+            body, "The standard — 15:15:35:15:20 of total net worth\n"
+                  "• BTC 15% — asymmetric upside, not maxi "
+                  "(9% spot/ETF + 6% MSTR)\n"
+                  "• Gold 15% — structural hedge against technology\n"
+                  "• Equities 35% — growth engine\n"
+                  "• Cash 15% — buffer, incl. 20% STRC\n"
+                  "• Real Estate 20% — home anchor\n"
+                  "Note: STRC is BTC-correlated preferred, so effective BTC "
+                  "exposure runs ~2–3pp above stated.",
+            padx=6, pady=6, fill="x")
         rows = []
         for r in self.data["view3"]:
             rows.append([r["bucket"], pct(r["target_pct"]),
@@ -839,18 +1020,19 @@ class App(ctk.CTk):
                          pct(r["actual_pct"]),
                          "%+.1fpp" % r["deviation_pp"],
                          money(r["rebalance"])])
-        Table(f, ["Bucket", "Target %", "Target $", "Actual $", "Actual %",
-                  "Deviation (pp)", "Rebalance buy(+) / sell(-)"],
+        Table(body, ["Bucket", "Target %", "Target $", "Actual $",
+                     "Actual %", "Deviation (pp)",
+                     "Rebalance buy(+) / sell(-)"],
               rows).pack(fill="both", padx=6, pady=6)
         fig1 = Figure(figsize=(10, 4.2), dpi=100)
         pc.make_allocation_chart(fig1, self.data["view3"])
-        self._chart_canvas(f, fig1, aspect=0.42)
+        self._chart_canvas(body, fig1)
         ctk.CTkLabel(
-            f, text="REBALANCE PLAN (display only, NEVER executes "
+            body, text="REBALANCE PLAN (display only, NEVER executes "
                     "trades). All 4 trades inside Schwab Ashu IRA: $0 tax, "
                     "Medi-Cal safe. Verify on the trade ticket before "
                     "executing.",
-            wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+            wraplength=860, anchor="w").pack(padx=6, pady=6, anchor="w")
         rows = []
         for t in self.data["view4"]["trades"]:
             rows.append([str(t["n"]), "Schwab Ashu IRA", t["sell"],
@@ -858,8 +1040,8 @@ class App(ctk.CTk):
                          money(t["proceeds"]), t["buy"],
                          "--" if t["buy_sh"] is None else f"{t['buy_sh']:,}",
                          "$0 (IRA)"])
-        Table(f, ["#", "Account", "Sell", "Sell shares", "Est. proceeds $",
-                  "Buy", "Est. buy shares", "Tax cost"],
+        Table(body, ["#", "Account", "Sell", "Sell shares",
+                     "Est. proceeds $", "Buy", "Est. buy shares", "Tax cost"],
               rows).pack(fill="both", padx=6, pady=6)
         v4 = self.data["view4"]
         tnw = self.data["tnw"]
@@ -874,7 +1056,8 @@ class App(ctk.CTk):
         rows.append(["**TOTAL", "**" + money(tnw), "**100.0%",
                      "**" + money(v4["after_total"]),
                      "**" + pct(v4["after_total"] / tnw) if tnw else "--"])
-        Table(f, ["Bucket", "Before $", "Before %", "After $", "After %"],
+        Table(body, ["Bucket", "Before $", "Before %", "After $",
+                     "After %"],
               rows).pack(fill="both", padx=6, pady=6)
         d = self.data["drift"]
         drift_txt = (
@@ -884,11 +1067,11 @@ class App(ctk.CTk):
             % (pct(d["actual_ytd"]), pct(d["standard_ytd"]),
                pct(d["drift_pp"]), money(d["drift_dollar"]),
                money(d["standard_total"])))
-        ctk.CTkLabel(f, text=drift_txt, wraplength=1100,
+        ctk.CTkLabel(body, text=drift_txt, wraplength=860,
                      anchor="w").pack(padx=6, pady=6, anchor="w")
-        fig2 = Figure(figsize=(10, 8.5), dpi=100)
+        fig2 = Figure(figsize=(10, 6.0), dpi=100)
         pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG))
-        self._chart_canvas(f, fig2, aspect=0.85, min_h=400)
+        self._chart_canvas(body, fig2)
 
     def build_tax(self):
         f = self._clear("Tax Harvest")
@@ -955,11 +1138,11 @@ class App(ctk.CTk):
         note = ("Itemized sold rows and the pre-app field must NOT overlap "
                 "— no double-counting. ")
         if unknown:
-            note += ("%d sold lot(s) have unknown basis and are EXCLUDED "
-                     "from the total. " % unknown)
+            note += ("%s have unknown basis and are EXCLUDED from the "
+                     "total. " % _n(unknown, "sold lot"))
         note += ("Do NOT invent basis. Wash-sale rule: do not rebuy the "
                  "same asset within 30 days of a loss sale.")
-        ctk.CTkLabel(f, text=note, wraplength=1100,
+        ctk.CTkLabel(f, text=note, wraplength=860,
                      anchor="w").pack(padx=6, pady=6, anchor="w")
 
     # (Charts merged into build_diversification; Rebalance merged too.)
@@ -1002,9 +1185,10 @@ class App(ctk.CTk):
         top = ctk.CTkFrame(f, fg_color="transparent")
         top.pack(fill="x", padx=8, pady=(8, 2))
         self.cov_progress = ctk.CTkLabel(
-            top, text="Holdings %d/%d · Cost %d/%d · Acquired dates %d/%d" % (
-                t["holdings_ok"], t["holdings_n"], t["cost_ok"], t["cost_n"],
-                t["acq_ok"], t["acq_n"]),
+            top, text="Positions %d of %d · Cost entered %d of %d · Dates "
+                      "entered %d of %d" % (
+                          t["holdings_ok"], t["holdings_n"], t["cost_ok"],
+                          t["cost_n"], t["acq_ok"], t["acq_n"]),
             font=ctk.CTkFont(size=FS_BODY, weight="bold"))
         self.cov_progress.pack(side="left", padx=4)
         n = self._cov_counts()
@@ -1027,18 +1211,25 @@ class App(ctk.CTk):
                           command=self._cov_guide_start).pack(side="right",
                                                              padx=4)
         self.cov_warn = ctk.CTkLabel(f, text="", text_color="orange",
-                                     wraplength=1050, anchor="w")
+                                     wraplength=860, anchor="w")
         self.cov_warn.pack(padx=8, anchor="w")
         if self.cov_guide:
             self._cov_guide_panel(f)
         else:
-            ctk.CTkLabel(
-                f, text="Taxable: REQUIRED (tax + harvesting need cost and "
-                        "dates) · IRA/Roth/HSA: OPTIONAL (display only) · "
-                        "Cash: complete by nature. Rows are locked — click "
-                        "Edit on a row to change it. Typing never recomputes; "
-                        "Save commits everything at once.",
-                wraplength=1050, anchor="w").pack(padx=8, pady=2, anchor="w")
+            self._selectable_note(
+                f, "How this grid works\n"
+                   "• Taxable accounts are REQUIRED — cost and dates drive "
+                   "your taxes and tax-loss harvesting. IRA, Roth and HSA "
+                   "accounts are OPTIONAL (display only). Cash is always "
+                   "complete.\n"
+                   "• Rows are locked. Click Edit to change a row, or ↗ to "
+                   "move it to another account.\n"
+                   "• Typing never recalculates anything. Save (top right) "
+                   "checks everything and commits at once; Revert throws "
+                   "away unsaved edits.\n"
+                   "• Click any text and press Ctrl+C to copy it; every "
+                   "table has a Copy table button.",
+                padx=8, pady=2, fill="x")
         if not self.cov_lots:
             ctk.CTkLabel(
                 f, text="No accounts yet.",
@@ -1731,7 +1922,8 @@ class App(ctk.CTk):
             try:
                 t = self._cov_totals()
                 self.cov_progress.configure(
-                    text="Holdings %d/%d · Cost %d/%d · Acquired dates %d/%d"
+                    text="Positions %d of %d · Cost entered %d of %d · "
+                         "Dates entered %d of %d"
                          % (t["holdings_ok"], t["holdings_n"], t["cost_ok"],
                             t["cost_n"], t["acq_ok"], t["acq_n"]))
             except (tk.TclError, ValueError):
@@ -1758,8 +1950,8 @@ class App(ctk.CTk):
                         "%d duplicate-lot warnings (first: %s)"
                         % (len(dups), dups[0]))
         if bad_rows:
-            bits.append("%d row(s) have invalid cells (red) — fix before "
-                        "Save" % bad_rows)
+            bits.append("%s have invalid cells (red) — fix before Save"
+                        % _n(bad_rows, "row"))
         if getattr(self, "cov_warn", None) is not None and \
                 self.cov_warn.winfo_exists():
             self.cov_warn.configure(text=" · ".join(bits))
@@ -1774,7 +1966,7 @@ class App(ctk.CTk):
                 self.cov_count_lbl.winfo_exists():
             left = self._cov_totals()["required_left"]
             self.cov_count_lbl.configure(
-                text="%d required positions to go" % left)
+                text="%s left to feed" % _n(left, "position"))
 
     def _cov_save(self):
         raw = []
@@ -2184,32 +2376,45 @@ class App(ctk.CTk):
             return
         left = self._cov_totals()["required_left"]
         self.cov_count_lbl = ctk.CTkLabel(
-            panel, text="%d required positions to go" % left,
+            panel, text="%s left to feed" % _n(left, "position"),
             font=ctk.CTkFont(size=FS_BODY, weight="bold"))
         self.cov_count_lbl.pack(padx=8, pady=(6, 2), anchor="w")
-        ctk.CTkLabel(
-            panel, text="Feeding: %s — save this account, then take the "
-                        "next. The full grid stays available via Show all."
-                        % self.cov_filter,
-            wraplength=1000, anchor="w").pack(padx=8, anchor="w")
         bank = next((r.get("bank") for r in self.cov_lots
                      if r.get("account") == self.cov_filter), "")
-        lines = []
-        for g in BROKER_GUIDE:
-            if g["field"] in ("bank", "account", "account_type"):
-                continue
-            if "Schwab" in (bank or ""):
-                where = g["schwab"]
-            elif "Vanguard" in (bank or ""):
-                where = g["vanguard"]
-            else:
-                where = g["concept"] + " (Holdings/Positions → Cost " \
-                    "basis/Lots; History/Realized gains for sold lots)"
-            lines.append("%s: %s  (e.g. %s)" % (
-                g["field"], where, g["example"]))
-        ctk.CTkLabel(panel, text="\n".join(lines), wraplength=1000,
-                     anchor="w", justify="left").pack(padx=8, pady=4,
-                                                     anchor="w")
+        if "Schwab" in (bank or ""):
+            bank_label = "Schwab"
+        elif "Vanguard" in (bank or ""):
+            bank_label = "Vanguard"
+        else:
+            bank_label = "your broker"
+        lines = [
+            "Feeding this account: %s" % self.cov_filter,
+            "Fill the rows below from this one broker statement, then "
+            "press Save. The full grid stays available via Show all.",
+            "",
+        ]
+        if "Schwab" in (bank or "") or "Vanguard" in (bank or ""):
+            lines.append("Where each number lives (%s):" % bank_label)
+            for g in BROKER_GUIDE:
+                if g["field"] in ("bank", "account", "account_type"):
+                    continue
+                where = g["schwab"] if "Schwab" in (bank or "") \
+                    else g["vanguard"]
+                lines.append("• %s — %s (example: %s)" % (
+                    g["field"], where, g["example"]))
+        else:
+            # One pattern for every other broker — stated once, not repeated
+            # on all six lines.
+            lines.append("Where each number lives: open lots under "
+                         "Holdings/Positions → Cost basis/Lots; sold lots "
+                         "under History/Realized gains (the year-end 1099-B "
+                         "is the authority).")
+            for g in BROKER_GUIDE:
+                if g["field"] in ("bank", "account", "account_type"):
+                    continue
+                lines.append("• %s — %s (example: %s)" % (
+                    g["field"], g["concept"], g["example"]))
+        self._selectable_note(panel, "\n".join(lines))
         bar = ctk.CTkFrame(panel, fg_color="transparent")
         bar.pack(fill="x", padx=8, pady=(0, 6))
         ctk.CTkButton(bar, text="Next account", width=130,
@@ -2257,16 +2462,18 @@ class App(ctk.CTk):
 
     def build_data_template(self):
         f = self._clear_data_tab("Template")
-        ctk.CTkLabel(
-            f, text="Fill this yourself, or paste screenshots of your broker "
-                    "positions into ChatGPT, Muse, Gemini, or any AI and ask "
-                    "it to fill this template — then upload the result here "
-                    "(Copy AI prompt button below). "
-                    "One row per lot. Open lots leave sold_date and "
-                    "sale_price_per_share blank. Uploads upsert by lot "
-                    "(account+asset+acquired+cost): matching lots update, "
-                    "new lots insert, uploads NEVER delete rows.",
-            wraplength=1050, anchor="w").pack(padx=8, pady=8, anchor="w")
+        self._selectable_note(
+            f, "Two ways to fill the template\n"
+               "1. Yourself — download the full template (or one account's "
+               "template from Inputs), fill one row per lot, upload it here.\n"
+               "2. With AI — paste broker screenshots into ChatGPT, Muse, "
+               "Gemini or any AI together with the Copy-AI-prompt text, "
+               "then upload the CSV it returns.\n"
+               "Open lots leave sold_date and sale_price_per_share blank. "
+               "Uploads match lots by account + asset + acquired date + "
+               "cost: matches update, new lots insert, uploads NEVER "
+               "delete rows.",
+            padx=8, pady=8, fill="x")
         bar = ctk.CTkFrame(f, fg_color="transparent")
         bar.pack(fill="x", padx=8, pady=4)
         ctk.CTkButton(bar, text="Download full template",
@@ -2281,10 +2488,10 @@ class App(ctk.CTk):
                                                           padx=4)
         ctk.CTkButton(bar, text="Copy AI prompt",
                       command=self.copy_ai_prompt).pack(side="left", padx=4)
-        self.template_msg = ctk.CTkLabel(f, text="", wraplength=1050,
+        self.template_msg = ctk.CTkLabel(f, text="", wraplength=860,
                                          anchor="w")
         self.template_msg.pack(padx=8, pady=4, anchor="w")
-        ctk.CTkLabel(f, text="Where each field lives at your broker:",
+        ctk.CTkLabel(f, text="Where to find each field at your broker:",
                      font=ctk.CTkFont(weight="bold")).pack(padx=8, pady=(8, 2),
                                                            anchor="w")
         # One scrollable text block, not per-cell labels (fast scrolling).
@@ -2308,7 +2515,22 @@ class App(ctk.CTk):
             "History/Realized gains for closed lots; the year-end 1099-B is "
             "the authority for sold lots.")
         guide.insert("1.0", "\n".join(lines))
-        guide.configure(state="disabled")
+        # Read-only but mouse-selectable (Ctrl+C works): a disabled box
+        # cannot be selected at all. Typing/paste/cut are blocked below;
+        # navigation, selection and Control shortcuts stay live.
+        _tb = guide._textbox
+
+        def _guide_key(e):
+            if e.state & 0x4:  # Control held: copy, select-all, etc.
+                return None
+            if e.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
+                            "Prior", "Next"):
+                return None
+            return "break"
+
+        _tb.bind("<KeyPress>", _guide_key, add="+")
+        for _seq in ("<<Cut>>", "<<Paste>>"):
+            _tb.bind(_seq, lambda e: "break", add="+")
 
     def copy_ai_prompt(self):
         self.clipboard_clear()
@@ -2329,8 +2551,8 @@ class App(ctk.CTk):
         if derrs:
             return "REJECTED — nothing changed:\n%s" % "\n".join(derrs)
         self.lots = merged
-        self.lots_changed_externally("Ingested %d row(s) from %s."
-                                     % (len(rows), source))
+        self.lots_changed_externally("Ingested %s from %s."
+                                     % (_n(len(rows), "row"), source))
         return None
 
     def paste_rows(self):
@@ -2360,7 +2582,8 @@ class App(ctk.CTk):
                  for r in rows]
         msg = self._ingest_rows(fixed, "clipboard")
         self.template_msg.configure(
-            text=msg if msg else "Pasted %d row(s) from clipboard." % len(rows))
+            text=msg if msg else "Pasted %s from clipboard."
+            % _n(len(rows), "row"))
 
     def import_broker_csv(self):
         path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
@@ -2393,7 +2616,7 @@ class App(ctk.CTk):
         fixed = [{k.strip().lower(): v for k, v in r.items()} for r in rows]
         msg = self._ingest_rows(fixed, path)
         self.template_msg.configure(
-            text=msg if msg else "Imported %d row(s)." % len(rows))
+            text=msg if msg else "Imported %s." % _n(len(rows), "row"))
 
     def _write_template_csv(self, path, lots):
         with open(path, "w", newline="") as fh:
@@ -2449,7 +2672,7 @@ class App(ctk.CTk):
         # _ingest_rows → save_lots rebuilds this tab, so write to the
         # fresh label.
         self.template_msg.configure(
-            text=msg if msg else "Uploaded %d row(s)." % len(rows))
+            text=msg if msg else "Uploaded %s." % _n(len(rows), "row"))
 
     def build_data_profile(self):
         f = self._clear_data_tab("Profile")
@@ -2457,11 +2680,11 @@ class App(ctk.CTk):
         grid = ctk.CTkFrame(f, fg_color="transparent")
         grid.pack(fill="x", padx=8, pady=8)
         fields = [("date_of_birth", "Date of birth (YYYY-MM or YYYY-MM-DD)"),
-                  ("ss_owner_monthly", "Owner SS $/mo"),
-                  ("ss_spouse_monthly", "Spouse SS $/mo"),
+                  ("ss_owner_monthly", "Owner Social Security $/mo"),
+                  ("ss_spouse_monthly", "Spouse Social Security $/mo"),
                   ("other_realized_gains_current_year",
-                   "Other realized gains this year $"),
-                  ("other_realized_gains_note", "Note for the above"),
+                   "Other realized gains this year $ (pre-app history)"),
+                  ("other_realized_gains_note", "Source note for the above"),
                   ("home_purchase_price",
                    "Home purchase price $ (optional — Holdings gain %)")]
         for i, (key, label) in enumerate(fields):
@@ -2484,7 +2707,7 @@ class App(ctk.CTk):
                        money(sp["after65_allin"]),
                        "--" if sp["age"] is None else "age %d" % sp["age"],
                        sp["turns65"]),
-            wraplength=1050, anchor="w").pack(padx=8, pady=8, anchor="w")
+            wraplength=860, anchor="w").pack(padx=8, pady=8, anchor="w")
 
     def save_profile_from_form(self):
         try:
