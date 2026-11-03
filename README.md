@@ -11,16 +11,23 @@ Data Entry.** The ☰ menu holds exactly three items: Refresh stocks,
 Refresh home estimates, Log.
 
 - **Dashboard** — sub-tabs: **Overview** (landing: net worth, spending
-  capacity, key alerts, navigation cards), **Accounts** (bank → account →
-  position quantities, prices, values), **Holdings** (one row per asset
-  aggregated across accounts, weighted avg cost over known-cost lots only,
-  expandable per-account lot detail; home is one more row; cash lives in
-  Liquidity), **Liquidity** (liquid value by bank → account + bank totals,
-  plus spendability: $135,545/yr before 65; $111,900/yr + SS = $11,837/mo
-  all-in after 65), **Tax implications** (per-type tax facts, not advice, +
-  your account→type mapping).
+  capacity, key alerts, Target-vs-actual allocation grouped-bar chart —
+  blue Target %, red Actual %, 5 buckets, 0–50% axis — then navigation
+  cards), **Accounts** (bank → account → position quantities, prices,
+  values), **Holdings** (ONE expanding table filling the window, one scroll
+  region: one row per asset aggregated across accounts, weighted avg cost
+  over known-cost lots only; ▶/▼ expands per-account rows in place beneath
+  the summary row; home is one more row; cash lives in Liquidity),
+  **Liquidity** (the sheet's Liquidity Plan tab: ONE row per institution —
+  Chase/chase unified case-insensitively — with Available < 65 / Available
+  > 65 / of-which penalty-free at 59½ (Feb 2028, a subset of > 65) / Total;
+  Cash + Taxable + HSA count < 65, Traditional + Roth IRA count > 65;
+  rows expand to accounts; footer has liquid total, home, net worth, and
+  years of before-65 spending covered), **Tax implications** (per-type tax
+  facts, not advice, + your account→type mapping).
 - **Diversification** — the 15:15:35:15:20 standard + rationale, current
-  position vs standard, allocation chart, rebalance plan (display only —
+  position vs standard, the same Target-vs-actual chart (one shared
+  implementation — values tie exactly), rebalance plan (display only —
   NEVER executes trades), drift chart (Actual vs Standard daily close,
   Y-axis $2M–$5M, $100K steps — the chart Google Sheets flattened).
 - **Tax Harvest** (view title "Tax Loss Harvesting") — per-lot unrealized
@@ -64,10 +71,17 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
 Sub-tabs Inputs / Template / Profile (reached via the tab or Overview
 cards — the ☰ menu opens no window).
 
-- **Inputs** — Bank → Account → lot grid with an overall progress line.
-  Taxable = REQUIRED, IRA/Roth/HSA = OPTIONAL, Cash = complete. No
-  Bank/Account grid columns (shown in the section header); row Edit reveals
-  bank/account dropdowns so a misfiled lot moves instead of being re-typed.
+- **Inputs** — OPENS on the guided one-account view by default (first
+  account with required gaps, taxable first; "Show all" is opt-in, "Guided"
+  returns; completion state when all required accounts are fed — one
+  account bounds the widget count, which keeps scrolling fast). Bank →
+  Account → lot grid with an overall progress line. Taxable = REQUIRED,
+  IRA/Roth/HSA = OPTIONAL, Cash = complete. No Bank/Account grid columns
+  (shown in the section header); unlocked rows stay single-line — a per-row
+  **↗ Move** button expands ONLY that row's bank/account line (collapses on
+  Lock/Save; never duplicates). Cash rows (`CASH_USD`, Cash-type accounts)
+  render as a single **Amount ($)** field — no shares/cost/date prompts,
+  never flagged invalid, no Sell/Close (stored as shares=amount, cost=1).
   Closed lots listed per account, per-account type dropdown, per-account
   **Download template**, per-account live value (check vs broker),
   **+ Add row** inheriting the section, **+ Add account** (existing bank
@@ -76,10 +90,14 @@ cards — the ☰ menu opens no window).
   default; Edit unlocks to a white row with dark text (dirty marker if
   relocked with unsaved edits). Typing stages only — Tab/Enter/arrows move,
   Save validates and commits with one recompute, Revert discards. Dates are
-  typeable (YYYY-MM-DD) with a picker button; bad cells get a red outline,
-  duplicates a warning, each row shows live cost/proceeds/gain/term
-  arithmetic. Typing fewer shares is a count correction, never a sale.
-  Edit/Lock/Save update rows in place (scroll preserved; only Add scrolls).
+  typeable (YYYY-MM-DD) with a picker button; the picker header reads
+  "< November 2026 >" (arrows flank at top), year/month labels open
+  one-action pickers, and the popup anchors by the field without covering
+  the edited row. Bad cells get a red outline, duplicates a warning, each
+  row shows live cost/proceeds/gain/term arithmetic. Typing fewer shares is
+  a count correction, never a sale. Edit/Lock/Save update rows in place
+  (scroll preserved; only Add scrolls). Mouse wheel scrolls 5 units/notch
+  app-wide, over entries and buttons too — as fast as scrollbar drag.
 - **Template** — **Download full template** (header only), **Upload**,
   **Paste rows** (clipboard TSV/CSV), **Import broker CSV** (template-shaped
   exports import; anything else is plainly rejected, never guessed), and
@@ -89,9 +107,10 @@ cards — the ☰ menu opens no window).
 - **Profile** — date of birth, SS amounts, other gains + note, optional home
   purchase price (all editable, so a wrong seed is fixable in place). Shows
   live spending capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.
-- **Feed one account** — guided mode: one taxable account at a time with
-  its broker guidance and a "N required positions to go" countdown, then
-  the next. The full grid stays available.
+- **Feed one account** — the default Inputs view (see above): one taxable
+  account at a time with its broker guidance and a "N required positions to
+  go" countdown, then the next incomplete account. The full grid stays
+  available via Show all.
 
 ## Position lifecycle (Accounts tab buttons + Coverage grid)
 

@@ -393,20 +393,26 @@ class App(ctk.CTk):
             target = self.winfo_containing(event.x_root, event.y_root)
         except tk.TclError:
             return
+        # One notch = several rows (~5 units ≈ 90–120px): wheel must feel
+        # as fast as dragging the scrollbar. Window-level binding runs for
+        # every widget, so entries/buttons/rows never swallow the wheel.
+        try:
+            steps = event.delta // 120
+        except (AttributeError, TypeError):
+            steps = 0
+        if not steps:
+            steps = 1 if getattr(event, "delta", 0) > 0 else -1
         w = target
         while w is not None:
             if isinstance(w, (ctk.CTkTextbox, tk.Text)):
                 try:
-                    w.yview_scroll(-1 * (event.delta // 120), "units")
+                    w.yview_scroll(-5 * steps, "units")
                 except tk.TclError:
                     pass
                 return "break"
             if isinstance(w, ctk.CTkScrollableFrame):
                 try:
-                    w._parent_canvas.yview_scroll(
-                        -1 * (event.delta // 120) or -1 * (event.delta > 0
-                                                           and 1 or -1),
-                        "units")
+                    w._parent_canvas.yview_scroll(-5 * steps, "units")
                 except (tk.TclError, AttributeError):
                     pass
                 return "break"
@@ -451,6 +457,14 @@ class App(ctk.CTk):
         for alert in alerts:
             ctk.CTkLabel(f, text="• " + alert, wraplength=1100,
                          anchor="w").pack(padx=10, pady=1, anchor="w")
+        # Primary visual: the sheet's grouped-bar allocation chart, same
+        # shared implementation (and numbers) as Diversification.
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
+        fig = Figure(figsize=(10, 3.6), dpi=100)
+        pc.make_allocation_chart(fig, self.data["view3"])
+        FigureCanvasTkAgg(fig, master=f).get_tk_widget().pack(
+            fill="both", padx=10, pady=6)
         ctk.CTkLabel(f, text="Go to:",
                      font=ctk.CTkFont(weight="bold")).pack(padx=10,
                                                            pady=(10, 2),
@@ -469,68 +483,120 @@ class App(ctk.CTk):
                           command=lambda t=top, s=sub: self._goto(t, s)).pack(
                               side="left", padx=4, pady=4)
 
+    def _hold_avg_text(self, avg, missing):
+        if avg is None:
+            base = "--"
+        else:
+            base = "$%.2f" % avg
+        if (missing or 0) > 1e-9:
+            base += " (%s sh no cost)" % pc._fmt_shares(missing)
+        return base
+
     def build_holdings(self):
+        # ONE expanding table, ONE scroll region: each summary row carries
+        # its own ▶/▼ expander; per-account rows insert directly beneath.
+        # No lower panel, no nested scrolls.
         f = self._clear_dash("Holdings")
+        if getattr(self, "_hold_expanded", None) is None:
+            self._hold_expanded = set()
         rows, _total = pc.holdings_by_asset(
             self.lots, self.prices, self.home_value,
             self.profile.get("home_purchase_price") or None)
-        table_rows = []
+        scroll = ctk.CTkScrollableFrame(f)
+        scroll.pack(fill="both", expand=True, padx=6, pady=6)
+        header = ctk.CTkFrame(scroll, fg_color="transparent")
+        header.pack(fill="x", padx=4)
+        for col, (txt, w) in enumerate(
+                [("", 30), ("Asset", 150), ("Total shares", 90),
+                 ("Avg purchase price", 170), ("Current price", 90),
+                 ("Current value", 100), ("Net gain $", 90),
+                 ("Net gain %", 80)]):
+            ctk.CTkLabel(header, text=txt, width=w,
+                         font=ctk.CTkFont(weight="bold")).grid(
+                             row=0, column=col, padx=2, sticky="w")
         for r in rows:
-            avg = "--" if r["avg_cost"] is None else "$%.2f" % r["avg_cost"]
-            if r["missing"] > 1e-9:
-                avg += " (%s sh no cost)" % pc._fmt_shares(r["missing"])
-            table_rows.append([
-                r["asset"], pc._fmt_shares(r["shares"]), avg,
-                "--" if r["price"] is None else "$%.2f" % r["price"],
-                money(r["value"]),
-                "--" if r["gain"] is None else money(r["gain"]),
-                "--" if r["gain_pct"] is None else "%.1f%%" % (
-                    r["gain_pct"] * 100)])
-        Table(f, ["Asset", "Total shares", "Avg purchase price",
-                  "Current price", "Current value", "Net gain $",
-                  "Net gain %"],
-              table_rows).pack(fill="both", expand=True, padx=6, pady=6)
-        for r in rows:
-            if not r["by_acct"]:
-                continue
-            box = ctk.CTkFrame(f)
-            box.pack(fill="x", padx=6, pady=2)
-            detail = ctk.CTkFrame(box)
-            open_state = {"open": False}
-            btn = ctk.CTkButton(box, width=280, anchor="w",
-                                text="▸ %s by account" % r["asset"])
-            btn.pack(padx=4, pady=2, anchor="w")
-            btn.configure(command=lambda b=btn, bb=box, dd=detail, rr=r,
-                          st=open_state: self._holdings_toggle(
-                              bb, dd, rr, st, b))
+            self._hold_row(scroll, r)
         ctk.CTkLabel(
             f, text="Averages cover known-cost lots only; shares without "
                     "cost are flagged, never averaged in. Cash lives in "
                     "Liquidity. Home is one more row (value only unless a "
-                    "purchase price is set in the profile).",
+                    "purchase price is set in the profile). Click ▶ on a row "
+                    "for its per-account breakdown.",
             wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
 
-    def _holdings_toggle(self, box, detail, row, state, btn):
-        state["open"] = not state["open"]
-        if state["open"]:
-            btn.configure(text="▾ %s by account" % row["asset"])
-            for acct in sorted(row["by_acct"]):
-                for lot in row["by_acct"][acct]:
-                    ctk.CTkLabel(
-                        detail,
-                        text="%s: %s sh @ %s, acq %s [%s]" % (
-                            acct, pc._fmt_shares(lot.get("shares")),
-                            "--" if lot.get("cost") is None
-                            else "$%.2f" % lot["cost"],
-                            lot.get("acquired") or "--",
-                            pc.lot_status(lot)),
-                        anchor="w").pack(padx=18, anchor="w")
-            detail.pack(fill="x", padx=4, pady=2)
+    def _hold_row(self, scroll, r):
+        box = ctk.CTkFrame(scroll)
+        box.pack(fill="x", padx=4, pady=1)
+        line = ctk.CTkFrame(box, fg_color="transparent")
+        line.pack(fill="x")
+        expanded = r["asset"] in self._hold_expanded
+        if r["by_acct"]:
+            btn = ctk.CTkButton(line, width=30,
+                                text="▼" if expanded else "▶",
+                                command=lambda: self._hold_toggle(
+                                    box, detail, r, btn))
+            btn.grid(row=0, column=0, padx=2)
         else:
-            btn.configure(text="▸ %s by account" % row["asset"])
+            ctk.CTkLabel(line, text="", width=30).grid(row=0, column=0,
+                                                      padx=2)
+        cells = [
+            r["asset"], pc._fmt_shares(r["shares"]),
+            self._hold_avg_text(r["avg_cost"], r["missing"]),
+            "--" if r["price"] is None else "$%.2f" % r["price"],
+            money(r["value"]),
+            "--" if r["gain"] is None else money(r["gain"]),
+            "--" if r["gain_pct"] is None else "%.1f%%" % (
+                r["gain_pct"] * 100)]
+        widths = [150, 90, 170, 90, 100, 90, 80]
+        for col, (txt, w) in enumerate(zip(cells, widths)):
+            ctk.CTkLabel(line, text=txt, width=w, anchor="w").grid(
+                row=0, column=col + 1, padx=2, sticky="w")
+        detail = ctk.CTkFrame(box, fg_color="transparent")
+        if expanded:
+            self._hold_fill_detail(detail, r)
+            detail.pack(fill="x", padx=4, pady=2)
+
+    def _hold_fill_detail(self, detail, r):
+        # Per-account aggregates (same known-cost rule as the summary).
+        for ri, acct in enumerate(sorted(r["by_acct"])):
+            lots = r["by_acct"][acct]
+            sh = sum(l.get("shares") or 0.0 for l in lots)
+            ksh = sum(l.get("shares") or 0.0 for l in lots
+                      if l.get("cost") is not None)
+            kcost = sum((l.get("shares") or 0.0) * l["cost"] for l in lots
+                        if l.get("cost") is not None)
+            avg = kcost / ksh if ksh else None
+            price = r["price"]
+            value = None if price is None else sh * price
+            if price is not None and avg is not None:
+                gain = ksh * (price - avg)
+                gain_pct = gain / kcost if kcost else None
+            else:
+                gain, gain_pct = None, None
+            cells = [
+                "    " + acct, pc._fmt_shares(sh),
+                self._hold_avg_text(avg, sh - ksh),
+                "--" if price is None else "$%.2f" % price,
+                money(value),
+                "--" if gain is None else money(gain),
+                "--" if gain_pct is None else "%.1f%%" % (gain_pct * 100)]
+            widths = [150, 90, 170, 90, 100, 90, 80]
+            for col, (txt, w) in enumerate(zip(cells, widths)):
+                ctk.CTkLabel(detail, text=txt, width=w, anchor="w",
+                             text_color="gray").grid(row=ri, column=col + 1,
+                                                    padx=2, sticky="w")
+
+    def _hold_toggle(self, box, detail, r, btn):
+        if r["asset"] in self._hold_expanded:
+            self._hold_expanded.discard(r["asset"])
+            btn.configure(text="▶")
             detail.pack_forget()
-            for w in detail.winfo_children():
-                w.destroy()
+        else:
+            self._hold_expanded.add(r["asset"])
+            btn.configure(text="▼")
+            if not detail.winfo_children():
+                self._hold_fill_detail(detail, r)
+            detail.pack(fill="x", padx=4, pady=2)
 
     def build_accounts(self):
         f = self._clear_dash("Accounts")
@@ -570,36 +636,103 @@ class App(ctk.CTk):
                       command=self.reopen_form).pack(side="left", padx=4)
 
     def build_liquidity(self):
+        # The sheet's Liquidity Plan tab, rebuilt: ONE row per institution
+        # (cash-flow access before/after IRAs unlock), expandable to
+        # accounts. Unlock age 65 throughout; the 59½ column is an "of
+        # which" SUBSET of > 65, so rows still sum < 65 + > 65 = Total.
         f = self._clear_dash("Liquidity")
-        vals = pc.account_values(self.lots, self.prices)
-        banks = {}
-        for (bank, acct), v in vals.items():
-            banks.setdefault(bank, []).append((acct, v))
-        rows = []
-        for bank in sorted(banks):
-            for acct, v in sorted(banks[bank]):
-                rows.append([bank, acct, money(v)])
-            rows.append(["**%s total" % bank, "",
-                         "**" + money(sum(v for _, v in banks[bank]))])
-        rows.append(["**OVERALL LIQUID (excl. home)", "",
-                     "**" + money(self.data["liquid"])])
-        Table(f, ["Bank / Brokerage", "Account", "Liquid value $"],
-              rows).pack(fill="both", expand=True, padx=6, pady=6)
-        v = self.data["view2"]
-        sp = pc.spending_capacity(self.profile)
+        if getattr(self, "_liq_expanded", None) is None:
+            self._liq_expanded = set()
         ctk.CTkLabel(
-            f, text="Spendability (sheet-ported, live from profile): before "
-                    "65 %s/yr ($%s/mo). After 65: %s/yr ($%s/mo) + owner SS "
-                    "$%s/mo + spouse SS $%s/mo = %s/mo all-in. Under-65 "
-                    "spendable %s · over-65 unlock %s."
-                    % (money(sp["before65"]), money(sp["before65"] / 12),
-                       money(sp["after65_base"]),
-                       money(sp["after65_base"] / 12),
-                       money(self.profile.get("ss_owner_monthly", 0)),
-                       money(self.profile.get("ss_spouse_monthly", 0)),
-                       money(sp["after65_allin"] / 12),
-                       money(v["lt"]), money(v["gt"])),
+            f, text="Access to funds — what you can reach before 65 vs "
+                    "after IRAs unlock.",
+            font=ctk.CTkFont(size=14, weight="bold")).pack(padx=6, pady=(6, 2),
+                                                           anchor="w")
+        banks = pc.liquidity_by_bank(self.lots, self.prices)
+        scroll = ctk.CTkScrollableFrame(f)
+        scroll.pack(fill="both", expand=True, padx=6, pady=6)
+        self._liq_scroll = scroll
+        header = ctk.CTkFrame(scroll, fg_color="transparent")
+        header.pack(fill="x", padx=4)
+        for col, (txt, w) in enumerate(
+                [("", 30), ("Institution", 170), ("Available < 65", 130),
+                 ("Available > 65", 130), ("of which penalty-free at 59½",
+                                           170), ("Total", 130)]):
+            ctk.CTkLabel(header, text=txt, width=w,
+                         font=ctk.CTkFont(weight="bold")).grid(
+                             row=0, column=col, padx=2, sticky="w")
+        for norm in sorted(banks, key=lambda k: -banks[k]["total"]):
+            b = banks[norm]
+            box = ctk.CTkFrame(scroll)
+            box.pack(fill="x", padx=4, pady=1)
+            line = ctk.CTkFrame(box, fg_color="transparent")
+            line.pack(fill="x")
+            expanded = norm in self._liq_expanded
+            btn = ctk.CTkButton(line, width=30,
+                                text="▼" if expanded else "▶",
+                                command=lambda n=norm: self._liq_toggle(n))
+            btn.grid(row=0, column=0, padx=2)
+            for col, txt in enumerate(
+                    [b["display"], money(b["under65"]), money(b["over65"]),
+                     money(b["at59half"]), money(b["total"])]):
+                ctk.CTkLabel(line, text=txt, width=[170, 130, 130, 170,
+                                                   130][col],
+                             anchor="w").grid(row=0, column=col + 1, padx=2,
+                                              sticky="w")
+            detail = ctk.CTkFrame(box, fg_color="transparent")
+            if expanded:
+                for ri, acct in enumerate(sorted(b["accounts"])):
+                    a = b["accounts"][acct]
+                    for col, txt in enumerate(
+                            ["    " + acct, money(a["under"]),
+                             money(a["over"]), "",
+                             money(a["under"] + a["over"])]):
+                        ctk.CTkLabel(detail, text=txt, width=[170, 130, 130,
+                                                             170, 130][col],
+                                     anchor="w", text_color="gray").grid(
+                                         row=ri, column=col + 1, padx=2,
+                                         sticky="w")
+                detail.pack(fill="x", padx=4, pady=2)
+        under = sum(b["under65"] for b in banks.values())
+        over = sum(b["over65"] for b in banks.values())
+        liquid = under + over
+        sp = pc.spending_capacity(self.profile)
+        years = (under / sp["before65"]) if sp["before65"] else None
+        ctk.CTkLabel(
+            f, text="Totals: < 65 %s · > 65 %s · liquid %s · home %s · net "
+                    "worth %s. < 65 total ÷ %s/yr before-65 spending = %s "
+                    "years of spending covered until 65."
+                    % (money(under), money(over), money(liquid),
+                       money(self.home_value), money(self.data["tnw"]),
+                       money(sp["before65"]),
+                       "--" if years is None else "%.1f" % years),
             wraplength=1100, anchor="w").pack(padx=6, pady=6, anchor="w")
+        ctk.CTkLabel(
+            f, text="59½ (%s): penalty-free ≠ tax-free — Traditional "
+                    "withdrawals are still taxed as income; Roth earnings "
+                    "also need the 5-year rule (Roth balance here is "
+                    "negligible)."
+                    % pc.fifty_nine_half(self.profile.get("date_of_birth")),
+            wraplength=1100, anchor="w").pack(padx=6, pady=(0, 6), anchor="w")
+
+    def _liq_toggle(self, norm):
+        if norm in self._liq_expanded:
+            self._liq_expanded.discard(norm)
+        else:
+            self._liq_expanded.add(norm)
+        y = None
+        try:
+            if self._liq_scroll is not None and \
+                    self._liq_scroll.winfo_exists():
+                y = self._liq_scroll._parent_canvas.yview()
+        except (tk.TclError, AttributeError):
+            y = None
+        self.build_liquidity()
+        if y:
+            try:
+                self._liq_scroll._parent_canvas.yview_moveto(y[0])
+            except (tk.TclError, AttributeError):
+                pass
 
     TAX_TYPE_NOTES = {
         "Traditional IRA": "Withdrawals taxed as income; required minimum "
@@ -788,6 +921,13 @@ class App(ctk.CTk):
             self.cov_filter = None
             self.cov_guide = None
             self._cov_reset()
+            # Inputs opens guided: first account with required gaps.
+            todo = self._cov_incomplete_required()
+            if todo:
+                self.cov_filter = todo[0]
+                self.cov_guide = todo[0]
+            else:
+                self.cov_guide = "done"
 
     def refresh_data_window(self):
         self._ensure_cov_state()
@@ -831,7 +971,7 @@ class App(ctk.CTk):
                           command=self._cov_show_all).pack(side="right",
                                                           padx=4)
         else:
-            ctk.CTkButton(top, text="Feed one account", width=130,
+            ctk.CTkButton(top, text="Guided", width=90,
                           command=self._cov_guide_start).pack(side="right",
                                                              padx=4)
         self.cov_warn = ctk.CTkLabel(f, text="", text_color="orange",
@@ -920,7 +1060,7 @@ class App(ctk.CTk):
         for col, (txt, w) in enumerate(
                 [("Asset", 110), ("Shares", 80), ("Cost $", 80),
                  ("Acquired", 120), ("Sold", 120), ("Sale $", 80),
-                 ("", 175), ("", 24), ("", 52), ("", 52)]):
+                 ("", 175), ("", 24), ("", 52), ("", 52), ("", 40)]):
             ctk.CTkLabel(hdr, text=txt, width=w,
                          font=ctk.CTkFont(weight="bold")).grid(
                              row=0, column=col, padx=2)
@@ -1013,17 +1153,34 @@ class App(ctk.CTk):
             W["fg_def"] = None
         nav.append(amenu)
 
-        sh_ent, sh_var = entry(fr, 1, 80, row.get("shares"))
-        co_ent, co_var = entry(fr, 2, 80, row.get("cost"))
-        W.update(shares=sh_ent, shares_var=sh_var, cost=co_ent,
-                 cost_var=co_var)
-        for _e in (sh_ent, co_ent):
-            snap(_e)
-        sh_var.trace_add(
-            "write", lambda *_a, r=rid: self._cov_typed(r, "shares"))
-        co_var.trace_add(
-            "write", lambda *_a, r=rid: self._cov_typed(r, "cost"))
-        nav += [sh_ent, co_ent]
+        # Cash rows are an amount, not a position: one Amount field only
+        # (stored as shares=amount, cost=1). Never cost/date prompts (§2).
+        is_cash = (row.get("asset") == pc.CASH_ASSET or
+                   row.get("account_type") == "Cash")
+        W["is_cash"] = is_cash
+        if is_cash:
+            amt_ent, amt_var = entry(fr, 1, 170, row.get("shares"))
+            W.update(shares=amt_ent, shares_var=amt_var)
+            snap(amt_ent)
+            amt_var.trace_add(
+                "write", lambda *_a, r=rid: self._cov_typed(r, "shares"))
+            nav.append(amt_ent)
+            W["cash_note"] = ctk.CTkLabel(fr, text="Amount ($)", width=170,
+                                          anchor="w")
+            W["cash_note"].grid(row=0, column=2, columnspan=4, padx=2,
+                                sticky="w")
+        else:
+            sh_ent, sh_var = entry(fr, 1, 80, row.get("shares"))
+            co_ent, co_var = entry(fr, 2, 80, row.get("cost"))
+            W.update(shares=sh_ent, shares_var=sh_var, cost=co_ent,
+                     cost_var=co_var)
+            for _e in (sh_ent, co_ent):
+                snap(_e)
+            sh_var.trace_add(
+                "write", lambda *_a, r=rid: self._cov_typed(r, "shares"))
+            co_var.trace_add(
+                "write", lambda *_a, r=rid: self._cov_typed(r, "cost"))
+            nav += [sh_ent, co_ent]
 
         def date_cell(col, field):
             acell2 = ctk.CTkFrame(fr, fg_color="transparent")
@@ -1043,14 +1200,15 @@ class App(ctk.CTk):
             snap(ent)
             nav.append(ent)
 
-        date_cell(3, "acquired")
-        date_cell(4, "sold_date")
-        sa_ent, sa_var = entry(fr, 5, 80, row.get("sale_price"))
-        W.update(sale_price=sa_ent, sale_price_var=sa_var)
-        snap(sa_ent)
-        sa_var.trace_add(
-            "write", lambda *_a, r=rid: self._cov_typed(r, "sale_price"))
-        nav.append(sa_ent)
+        if not is_cash:
+            date_cell(3, "acquired")
+            date_cell(4, "sold_date")
+            sa_ent, sa_var = entry(fr, 5, 80, row.get("sale_price"))
+            W.update(sale_price=sa_ent, sale_price_var=sa_var)
+            snap(sa_ent)
+            sa_var.trace_add(
+                "write", lambda *_a, r=rid: self._cov_typed(r, "sale_price"))
+            nav.append(sa_ent)
 
         math = ctk.CTkLabel(fr, text="", width=175, anchor="w")
         math.grid(row=0, column=6, padx=2)
@@ -1069,11 +1227,19 @@ class App(ctk.CTk):
         ctk.CTkButton(fr, text="Del", width=52,
                       command=lambda r=rid: self._cov_delete(r)).grid(
                           row=0, column=9, padx=2)
+        move = ctk.CTkButton(fr, text="↗", width=40,
+                             command=lambda r=rid: self._cov_toggle_move(r))
+        move.grid(row=0, column=10, padx=2)
+        W["move"] = move
+        W["lockables"].append(move)
 
-        # edit drawer (row 1): bank + account dropdowns
+        # edit drawer: bank/account editors for moving the lot. Hidden
+        # unless the row's Move line is explicitly expanded (§1 fix).
         drawer = ctk.CTkFrame(fr, fg_color="transparent")
-        drawer.grid(row=1, column=0, columnspan=10, sticky="w", padx=2)
+        drawer.grid(row=1, column=0, columnspan=11, sticky="w", padx=2)
         W["drawer"] = drawer
+        ctk.CTkLabel(drawer, text="Move this lot to —").pack(side="left",
+                                                             padx=2)
         ctk.CTkLabel(drawer, text="Bank / Brokerage:").pack(side="left",
                                                             padx=2)
         bank_var = tk.StringVar(value=row.get("bank", ""))
@@ -1123,11 +1289,11 @@ class App(ctk.CTk):
         W["nav"] = nav
         for cidx, widget in enumerate(nav):
             widget.bind("<Return>", lambda _e, rr=ridx, c=cidx:
-                        self._cov_move(rr + 1, c))
+                        self._cov_move(rr + 1, c, +1))
             widget.bind("<Up>", lambda _e, rr=ridx, c=cidx:
-                        self._cov_move(rr - 1, c))
+                        self._cov_move(rr - 1, c, -1))
             widget.bind("<Down>", lambda _e, rr=ridx, c=cidx:
-                        self._cov_move(rr + 1, c))
+                        self._cov_move(rr + 1, c, +1))
         self._cov_sync_new_visibility(rid)
         self._cov_apply_lock_visual(rid)
         self._cov_paint_row(rid)
@@ -1150,13 +1316,14 @@ class App(ctk.CTk):
             except (tk.TclError, ValueError):
                 pass
         drawer = W.get("drawer")
+        show_drawer = (not locked) and bool(row.get("_move_open"))
         if drawer is not None:
             try:
-                if locked:
-                    drawer.grid_remove()
-                else:
-                    drawer.grid(row=1, column=0, columnspan=10, sticky="w",
+                if show_drawer:
+                    drawer.grid(row=1, column=0, columnspan=11, sticky="w",
                                 padx=2)
+                else:
+                    drawer.grid_remove()
             except tk.TclError:
                 pass
         fr = W["frame"]
@@ -1238,16 +1405,39 @@ class App(ctk.CTk):
             self._cov_paint_row(rid)
         self._cov_refresh_chrome()
 
-    def _cov_move(self, ridx, cidx):
-        if 0 <= ridx < len(self.cov_nav_rows):
-            row = self.cov_nav_rows[ridx]
+    def _cov_move(self, ridx, cidx, direction):
+        # Skip unmapped widgets (collapsed Move drawers) in scan direction.
+        r = ridx
+        while 0 <= r < len(self.cov_nav_rows):
+            row = self.cov_nav_rows[r]
             if 0 <= cidx < len(row):
                 try:
-                    if row[cidx].winfo_exists():
+                    if row[cidx].winfo_exists() and \
+                            row[cidx].winfo_ismapped():
                         row[cidx].focus_set()
+                        return "break"
                 except tk.TclError:
                     pass
+            r += direction
         return "break"
+
+    def _cov_toggle_move(self, rid):
+        # Expanding one row's Move line never touches any other row.
+        try:
+            row = self._cov_row_by_rid(rid)
+        except StopIteration:
+            return
+        row["_move_open"] = not row.get("_move_open")
+        self._cov_apply_lock_visual(rid)
+
+    def _cov_toggle_lock(self, rid):
+        row = self._cov_row_by_rid(rid)
+        row["_locked"] = not row.get("_locked", True)
+        if row.get("_locked"):
+            row["_move_open"] = False
+        self._cov_apply_lock_visual(rid)
+        self._cov_paint_row(rid)
+        self._cov_refresh_chrome()
 
     def _cov_rebind_nav(self):
         self.cov_nav_rows = []
@@ -1266,11 +1456,11 @@ class App(ctk.CTk):
             for cidx, widget in enumerate(nav):
                 try:
                     widget.bind("<Return>", lambda _e, rr=ridx, c=cidx:
-                                self._cov_move(rr + 1, c))
+                                self._cov_move(rr + 1, c, +1))
                     widget.bind("<Up>", lambda _e, rr=ridx, c=cidx:
-                                self._cov_move(rr - 1, c))
+                                self._cov_move(rr - 1, c, -1))
                     widget.bind("<Down>", lambda _e, rr=ridx, c=cidx:
-                                self._cov_move(rr + 1, c))
+                                self._cov_move(rr + 1, c, +1))
                 except tk.TclError:
                     pass
 
@@ -1438,7 +1628,10 @@ class App(ctk.CTk):
         # live row arithmetic: implied totals, never a recompute
         sh, co = row.get("shares"), row.get("cost")
         parts = []
-        if sh and co is not None:
+        if sh and (row.get("asset") == pc.CASH_ASSET
+                   or row.get("account_type") == "Cash"):
+            parts.append("≡ %s" % money(sh))
+        elif sh and co is not None:
             parts.append("≡ %s" % money(sh * co))
         else:
             parts.append("≡ ? (need shares+cost)")
@@ -1597,6 +1790,7 @@ class App(ctk.CTk):
                     used.add(j)
                     break
             row["_locked"] = True
+            row["_move_open"] = False
         if not moved and len(self.lots) == n_rows_pre and all(
                 r["_orig"] is not None for r in self.cov_lots):
             self._cov_repaint_all()
@@ -1613,8 +1807,11 @@ class App(ctk.CTk):
     def _cov_add_row(self, bank, acct):
         atype = self._cov_account_type(
             [r for r in self.cov_lots if r.get("account") == acct])
+        is_cash_acct = atype == "Cash"
         row = {"bank": bank, "account": acct, "account_type": atype,
-               "asset": "", "shares": None, "cost": None, "acquired": "",
+               "asset": "CASH_USD" if is_cash_acct else "",
+               "shares": None, "cost": 1.0 if is_cash_acct else None,
+               "acquired": "",
                "sold_date": "", "sale_price": None,
                "_rid": self.cov_next_rid, "_orig": None, "_locked": False}
         self.cov_next_rid += 1
@@ -1714,14 +1911,16 @@ class App(ctk.CTk):
             except ValueError:
                 msg.configure(text="Shares must be a positive number.")
                 return
-            if not asset_var.get().strip():
+            if not asset_var.get().strip() and type_menu.get() != "Cash":
                 msg.configure(text="First-lot asset is required.")
                 return
+            is_cash_acct = type_menu.get() == "Cash"
             row = {"bank": bank, "account": acct,
                    "account_type": type_menu.get(),
-                   "asset": asset_var.get().strip(), "shares": shares,
-                   "cost": None, "acquired": "", "sold_date": "",
-                   "sale_price": None,
+                   "asset": asset_var.get().strip() or "CASH_USD",
+                   "shares": shares,
+                   "cost": 1.0 if is_cash_acct else None, "acquired": "",
+                   "sold_date": "", "sale_price": None,
                    "_rid": self.cov_next_rid, "_orig": None, "_locked": False}
             self.cov_next_rid += 1
             self.cov_lots.append(row)
@@ -1754,17 +1953,15 @@ class App(ctk.CTk):
         self._cov_rebind_nav()
         self._cov_refresh_chrome()
 
-    def _cov_toggle_lock(self, rid):
-        row = self._cov_row_by_rid(rid)
-        row["_locked"] = not row.get("_locked", True)
-        self._cov_apply_lock_visual(rid)
-        self._cov_paint_row(rid)
-        self._cov_refresh_chrome()
-
     def _cov_calendar(self, rid, field):
+        # Hybrid entry: the field stays typeable; the picker is an
+        # alternative. Header "< November 2026 >" flanks the label; the
+        # year/month labels open one-action pickers. Anchored by the field,
+        # never covering the edited row.
         import calendar as calmod
         W = self.cov_widgets.get(rid, {})
         var = W.get(field + "_var")
+        anchor = W.get(field)
         if var is None:
             return
         try:
@@ -1775,52 +1972,98 @@ class App(ctk.CTk):
         win.title("Pick a date")
         win.transient(self)
         win.resizable(False, False)
-        state = {"y": cur.year, "m": cur.month}
-        title = ctk.CTkLabel(win, text="", font=ctk.CTkFont(weight="bold"))
-        title.pack(padx=10, pady=(10, 2))
-        grid = ctk.CTkFrame(win, fg_color="transparent")
-        grid.pack(padx=10, pady=6)
-        for c, wd in enumerate(["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]):
-            ctk.CTkLabel(grid, text=wd, width=36).grid(row=0, column=c)
+        try:
+            fx = anchor.winfo_rootx()
+            fy = anchor.winfo_rooty() + anchor.winfo_height() + 4
+        except (tk.TclError, AttributeError):
+            fx, fy = self.winfo_x() + 200, self.winfo_y() + 200
+        win.geometry("+%d+%d" % (fx, max(0, fy - 60)))
+        state = {"y": cur.year, "m": cur.month, "view": "days"}
+        header = ctk.CTkFrame(win, fg_color="transparent")
+        header.pack(padx=10, pady=(10, 2))
+        month_btn = ctk.CTkButton(header, width=110)
+        year_btn = ctk.CTkButton(header, width=70)
+        ctk.CTkButton(header, text="<", width=36,
+                      command=lambda: self._cov_cal_step(state, -1, draw)
+                      ).pack(side="left", padx=2)
+        month_btn.pack(side="left", padx=2)
+        year_btn.pack(side="left", padx=2)
+        ctk.CTkButton(header, text=">", width=36,
+                      command=lambda: self._cov_cal_step(state, +1, draw)
+                      ).pack(side="left", padx=2)
+        body = ctk.CTkFrame(win, fg_color="transparent")
+        body.pack(padx=10, pady=6)
 
-        def draw():
-            for w in grid.winfo_children():
-                if int(str(w.grid_info().get("row", 0))) >= 1:
-                    w.destroy()
-            title.configure(
-                text="%s %d" % (calmod.month_name[state["m"]], state["y"]))
-            r = 1
-            for week in calmod.monthcalendar(state["y"], state["m"]):
-                c = 0
-                for day in week:
-                    if day:
-                        ctk.CTkButton(
-                            grid, text=str(day), width=36,
-                            command=lambda d=day: pick(d)).grid(row=r,
-                                                               column=c,
-                                                               padx=1, pady=1)
-                    c += 1
-                r += 1
+        def clear():
+            for w in body.winfo_children():
+                w.destroy()
 
-        def pick(day):
+        def pick_day(day):
             var.set("%04d-%02d-%02d" % (state["y"], state["m"], day))
             win.destroy()
 
-        def step(dm):
-            m = state["m"] + dm
-            state["y"] += (m - 1) // 12
-            state["m"] = (m - 1) % 12 + 1
+        def draw():
+            clear()
+            month_btn.configure(
+                text=calmod.month_name[state["m"]],
+                command=lambda: show("months"))
+            year_btn.configure(text=str(state["y"]),
+                               command=lambda: show("years"))
+            if state["view"] == "days":
+                for c, wd in enumerate(["Mo", "Tu", "We", "Th", "Fr",
+                                        "Sa", "Su"]):
+                    ctk.CTkLabel(body, text=wd, width=36).grid(row=0,
+                                                              column=c)
+                r = 1
+                for week in calmod.monthcalendar(state["y"], state["m"]):
+                    c = 0
+                    for day in week:
+                        if day:
+                            ctk.CTkButton(
+                                body, text=str(day), width=36,
+                                command=lambda d=day: pick_day(d)).grid(
+                                    row=r, column=c, padx=1, pady=1)
+                        c += 1
+                    r += 1
+            elif state["view"] == "months":
+                for i in range(1, 13):
+                    ctk.CTkButton(
+                        body, text=calmod.month_abbr[i], width=76,
+                        command=lambda m=i: choose_month(m)).grid(
+                            row=(i - 1) // 3, column=(i - 1) % 3,
+                            padx=2, pady=2)
+            else:
+                years = range(state["y"] - 15, state["y"] + 16)
+                for i, yy in enumerate(years):
+                    ctk.CTkButton(
+                        body, text=str(yy), width=64,
+                        command=lambda y=yy: choose_year(y)).grid(
+                            row=i // 5, column=i % 5, padx=2, pady=2)
+
+        def show(view):
+            state["view"] = view
             draw()
 
-        bar = ctk.CTkFrame(win, fg_color="transparent")
-        bar.pack(padx=10, pady=(0, 10))
-        ctk.CTkButton(bar, text="<", width=40,
-                      command=lambda: step(-1)).pack(side="left", padx=4)
-        ctk.CTkButton(bar, text=">", width=40,
-                      command=lambda: step(1)).pack(side="left", padx=4)
+        def choose_month(m):
+            state["m"] = m
+            state["view"] = "days"
+            draw()
+
+        def choose_year(y):
+            state["y"] = y
+            state["view"] = "days"
+            draw()
+
         draw()
         win.after(50, lambda: (win.deiconify(), win.lift())
                   if win.winfo_exists() else None)
+
+    def _cov_cal_step(self, state, delta, draw):
+        m = state["m"] + delta
+        state["y"] += (m - 1) // 12
+        state["m"] = (m - 1) % 12 + 1
+        state["view"] = "days"
+        draw()
 
     def _cov_incomplete_required(self):
         """Accounts (taxable first) with open lots missing cost or dates."""
@@ -1841,7 +2084,9 @@ class App(ctk.CTk):
     def _cov_guide_start(self):
         todo = self._cov_incomplete_required()
         if not todo:
-            self.status_var.set("All required accounts are complete.")
+            self.cov_filter = None
+            self.cov_guide = "done"
+            self.build_data_coverage()
             return
         self.cov_filter = todo[0]
         self.cov_guide = self.cov_filter
@@ -1852,9 +2097,8 @@ class App(ctk.CTk):
                 if a != self.cov_filter]
         if not todo:
             self.cov_filter = None
-            self.cov_guide = None
+            self.cov_guide = "done"
             self.build_data_coverage()
-            self.status_var.set("All required accounts complete — full grid.")
             return
         self.cov_filter = todo[0]
         self.cov_guide = self.cov_filter
@@ -1868,6 +2112,19 @@ class App(ctk.CTk):
     def _cov_guide_panel(self, f):
         panel = ctk.CTkFrame(f)
         panel.pack(fill="x", padx=8, pady=2)
+        if self.cov_guide == "done" and not self.cov_filter:
+            ctk.CTkLabel(
+                panel,
+                text="All required accounts fed — Show all to review the "
+                     "full grid.",
+                font=ctk.CTkFont(size=14, weight="bold")).pack(
+                    padx=8, pady=8, anchor="w")
+            bar = ctk.CTkFrame(panel, fg_color="transparent")
+            bar.pack(fill="x", padx=8, pady=(0, 6))
+            ctk.CTkButton(bar, text="Show all", width=100,
+                          command=self._cov_show_all).pack(side="left",
+                                                          padx=4)
+            return
         left = self._cov_totals()["required_left"]
         self.cov_count_lbl = ctk.CTkLabel(
             panel, text="%d required positions to go" % left,

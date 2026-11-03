@@ -458,6 +458,9 @@ def make_allocation_chart(fig, view3):
     ax.set_xticklabels(labels, fontsize=9)
     ax.set_ylabel("% of total net worth")
     ax.set_title("Target vs actual allocation (total net worth)")
+    ax.set_ylim(0, 50)
+    import matplotlib.ticker as mticker
+    ax.yaxis.set_major_formatter(mticker.PercentFormatter())
     ax.legend(loc="upper right")
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
@@ -960,6 +963,55 @@ def account_values(lots, prices):
         key = (lot.get("bank") or "?", lot.get("account"))
         vals[key] = vals.get(key, 0.0) + lot["shares"] * price
     return vals
+
+
+def fifty_nine_half(dob):
+    """'Feb 2028' for born-Aug-1968: DOB + 59y6m. '--' when unparseable."""
+    try:
+        y, m = int(str(dob)[:4]), int(str(dob)[5:7])
+    except (ValueError, TypeError):
+        return "--"
+    m += 6
+    y += (m - 1) // 12
+    m = (m - 1) % 12 + 1
+    y += 59
+    return datetime.date(y, m, 1).strftime("%b %Y")
+
+
+def liquidity_by_bank(lots, prices):
+    """{normkey: {display, under65, over65, at59half, accounts}} — ONE row
+    per institution, grouped case-insensitively. Classified by
+    account_type: Cash/Taxable/HSA → under 65; Traditional/Roth IRA → over
+    65 (and the 59½ subset). Unlock age is 65 throughout."""
+    banks = {}
+    for lot in open_lots(lots):
+        if lot.get("shares") is None:
+            continue
+        asset = lot.get("asset")
+        price = 1.0 if asset == CASH_ASSET else prices.get(asset)
+        if price is None:
+            continue
+        value = lot["shares"] * price
+        norm = (lot.get("bank") or "?").strip().casefold()
+        bank = banks.setdefault(norm, {"display": (lot.get("bank") or "?"),
+                                       "under65": 0.0, "over65": 0.0,
+                                       "at59half": 0.0, "accounts": {}})
+        atype = lot.get("account_type")
+        acct = bank["accounts"].setdefault(lot.get("account"),
+                                           {"under": 0.0, "over": 0.0})
+        if atype in RETIREMENT_TYPES_UNLOCK65:
+            bank["over65"] += value
+            bank["at59half"] += value
+            acct["over"] += value
+        else:
+            bank["under65"] += value
+            acct["under"] += value
+    for bank in banks.values():
+        bank["total"] = bank["under65"] + bank["over65"]
+    return banks
+
+
+RETIREMENT_TYPES_UNLOCK65 = ("Traditional IRA", "Roth IRA")
 
 
 def holdings_by_asset(lots, prices, home_value, home_cost=None):
