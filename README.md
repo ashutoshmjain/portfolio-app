@@ -11,23 +11,32 @@ Data Entry.** The ☰ menu holds exactly three items: Refresh stocks,
 Refresh home estimates, Log.
 
 - **Dashboard** — sub-tabs: **Overview** (landing: net worth, spending
-  capacity, key alerts, then the Actual-vs-Standard daily-close LINE chart
-  — blue Actual total $, red Standard total $, $2M–$5M / $100K steps, same
-  shared implementation and values as Diversification — then navigation
-  cards), **Accounts** (bank → account → position quantities, prices,
-  values), **Holdings** (ONE expanding table filling the window, one scroll
-  region: one row per asset aggregated across accounts, weighted avg cost
-  over known-cost lots only; ▶/▼ expands per-account rows in place beneath
-  the summary row; home is one more row; cash lives in Liquidity),
+  capacity, key alerts, a Copy summary button, then the Actual-vs-Standard
+  daily-close LINE chart — blue Actual total $, red Standard total $,
+  $2M–$5M / $100K steps, same shared implementation and values as
+  Diversification; the bottom area is reserved for the future
+  upcoming-events calendar), **Accounts** (bank → account → position
+  quantities, prices, values), **Holdings** (ONE expanding table filling
+  the window, one scroll region: one row per asset aggregated across
+  accounts; Avg purchase price and gains show ONLY when every open lot has
+  cost — otherwise Avg reads `upload` with a missing-count tooltip and
+  gains read `--`, per account in the ▶/▼ expansion too; home is one more
+  row; cash lives in Liquidity),
   **Liquidity** (the sheet's Liquidity Plan tab, framed by TRUE access age:
   ONE row per institution — Chase/chase unified case-insensitively — with
-  Available now / Unlocks at 59½ (Feb 2028) / Total; Cash + Taxable + HSA
-  count as Available now, Traditional + Roth IRA unlock at 59½; rows sum
-  and expand to accounts; footer has liquid total, home, net worth, and
-  years of pre-65 spending covered by available-now money; 65 appears
-  nowhere on this tab — it stays a spending/SS milestone on Overview only),
+  Available now / Unlocks at 59½ (date from the Profile date of birth) /
+  Total; Cash + Taxable + HSA count as Available now, Traditional + Roth
+  IRA unlock at 59½; rows sum and expand to accounts; footer has liquid
+  total, home, net worth, and years of pre-65 spending covered by
+  available-now money; 65 appears nowhere on this tab — it stays a
+  spending/SS milestone on Overview only),
   **Tax implications** (per-type tax facts, not advice, + your
   account→type mapping).
+- **Empty state** — with ZERO positions, Overview shows no numbers, no
+  chart, no alerts: only "No data yet — add your first bank / account, or
+  upload a filled template" with those two actions as buttons. A fresh copy
+  ships blank defaults (no personal values in the code) — fill in the
+  Profile tab and set the home estimate via ☰ → Refresh home estimates.
 - **Diversification** — the 15:15:35:15:20 standard + rationale, current
   position vs standard, the Target-vs-actual allocation bar chart (this tab
   only), rebalance plan (display only — NEVER executes trades), and the
@@ -37,21 +46,27 @@ Refresh home estimates, Log.
 - **Tax Harvest** (view title "Tax Loss Harvesting") — per-lot unrealized
   P&L with Long/Short holding term, realized gains from closed lots, $15K
   Medi-Cal gains guardrail + leeway.
-- **Data Entry** (last) — sub-tabs Inputs / Template / Profile (see below).
+- **Data Entry** (last) — sub-tabs Inputs / Template / Profile /
+  Danger Zone (see below).
 
 Deferred: an Overview news feed (earnings, Fed meetings) waits for the
 AI-embedding phase — raw feeds are noisy and curation is the value. No
-placeholder UI.
+placeholder UI. (The Overview bottom area is separately reserved for the
+future upcoming-events calendar for portfolio holdings.)
 
 ## Copying out of the app (Ctrl+C, tables, AI)
 
 - Click any text, then press **Ctrl+C** — entries keep native selection
-  copy; readout labels copy their text; anything inside a table copies the
+  copy; readout labels copy their text (the click focuses the label even
+  when it lands on a wrapper); anything inside a table copies the
   whole table. The top bar confirms each copy.
-- Every table has a **Copy table** button (top right of the table): TSV to
-  the clipboard, pasting straight into Excel, Sheets, or any AI chat.
+- Overview has a **Copy summary** button (net worth, spending, alerts).
+  Holdings, Liquidity, and the Inputs grid each have a **Copy table** /
+  **Copy grid** button: TSV to the clipboard, pasting straight into Excel,
+  Sheets, or any AI chat.
 - Instruction blocks (Inputs guide, Template guide, Diversification
-  standard) are real selectable text: drag to select, Ctrl+C to copy.
+  standard) and the key readout notes are real selectable text: drag to
+  select, Ctrl+C to copy.
 - Counts use plain plurals ("1 row", "11 positions") — no "(s)" anywhere.
 
 ## Readability (older eyes, split screen)
@@ -73,8 +88,9 @@ placeholder UI.
   track the container width and shrink to fit; Overview and
   Diversification scroll vertically as one region each, so tall figures
   are never cropped by a short window (that clipping once ate x-labels,
-  legends, and whole bar groups). Long labels wrap at 860px; the Overview
-  nav cards sit 4-across in a grid.
+  legends, and whole bar groups). Long labels wrap at 860px; crowded
+  button rows consolidate secondary actions into a More ▾ menu instead of
+  scrolling or stacking.
 
 ## Data model — one row per lot
 
@@ -95,18 +111,25 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
   keeping a residual row; dated shares beyond the balance are rejected —
   nothing is ever silently dropped or double-counted. Correct a lot's date
   in the grid (net-change, no false draw); uploads only add or update.
+- **Upload transparency** — every upload/paste/import reports "N rows: X
+  updated (already existed), Y inserted (new)", so a duplicate upload reads
+  e.g. "31 rows: 31 updated, 0 inserted" and the dedup is visible instead
+  of wondered-about. Uploads need NOT be complete — they merge. Complete
+  replacement = delete all data first (Danger Zone), then upload.
 - `account_type`: `Traditional IRA`, `Roth IRA`, `Taxable`, `HSA`, `Cash`.
   Cash rows (`CASH_USD`, savings) need no cost or dates.
 - **Share edits are count CORRECTIONS, not sales** — no tax event. A sale
   always records date and price.
 - Settings live in **`profile.json`** (gitignored): date of birth, monthly
   Social Security (owner + spouse), other realized gains this year + source
-  note, and the sheet-ported spending base figures.
+  note, spending base figures, the remembered backup folder, and the last
+  backup stamp. A fresh copy ships NEUTRAL blanks — no personal values are
+  seeded in the code; the user fills these in the Profile tab.
 
 ## Data Entry (last tab)
 
-Sub-tabs Inputs / Template / Profile (reached via the tab or Overview
-cards — the ☰ menu opens no window).
+Sub-tabs Inputs / Template / Profile / Danger Zone — the tab bar is the
+only navigation (the ☰ menu opens no window).
 
 - **Inputs** — OPENS on the guided one-account view by default (first
   account with required gaps, taxable first; "Show all" is opt-in, "Guided"
@@ -143,12 +166,19 @@ cards — the ☰ menu opens no window).
   defaults to your Downloads folder as
   `filled-template-YYYYMMDD-HHMM.csv`, never the repo folder; exports the
   last saved state, so unsaved Inputs edits ask Save & Download /
-  Download saved state / Cancel), **Upload**, **Paste rows** (clipboard
-  TSV/CSV), **Import broker CSV** (template-shaped exports import;
-  anything else is plainly rejected, never guessed), and **Copy AI prompt**
-  (ready-made screenshot-to-CSV prompt for any AI). The tab also carries a
-  per-field broker guide (Schwab + Vanguard paths, CSV-export pointers,
-  1099-B note) as one fast-scrolling text block.
+  Download saved state / Cancel), **Upload filled template** (reports
+  "N rows: X updated, Y inserted"), **Back up now** (one-click backup into
+  your remembered backup folder — timestamped `filled-template-*.csv`
+  files accumulate; a synced Drive/OneDrive/Dropbox folder carries them to
+  other machines, no cloud integration — plus a last-backup stamp and a
+  Change-backup-folder button), and a **More ▾** menu holding the secondary
+  actions **Paste rows** (clipboard TSV/CSV), **Import broker CSV**
+  (template-shaped exports import; anything else is plainly rejected,
+  never guessed), and **Copy AI prompt** (ready-made screenshot-to-CSV
+  prompt for any AI). Download = save-dialog each time, anywhere; backup =
+  remembered folder + one click + stamp. The tab also carries a per-field
+  broker guide (Schwab + Vanguard paths, CSV-export pointers, 1099-B note)
+  as one fast-scrolling text block.
 - **True-up test** — verify a fresh copy of the app reproduces your data:
   Save, then Template → Download filled template (note open/closed counts,
   per-account values, liquid total, net worth). Fresh clone (no data files
@@ -160,8 +190,15 @@ cards — the ☰ menu opens no window).
   not prices (the clone fetches its own) and not home value (set it
   identically in the clone).
 - **Profile** — date of birth, SS amounts, other gains + note, optional home
-  purchase price (all editable, so a wrong seed is fixable in place). Shows
+  purchase price (all blank by default — the user fills them in). Shows
   live spending capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.
+- **Danger Zone** — red-styled data-management tab. Delete all data (with
+  a backup-first warning, an inline Download filled template button, and a
+  type-DELETE confirmation) wipes portfolio.csv, profile.json,
+  drift_log.csv, and prices_cache.json, returning the app to the
+  fresh-install empty state; re-uploading restores the numbers. Needed
+  because uploads upsert, never replace — delete-then-upload is the only
+  clean dataset replacement.
 - **Feed one account** — the default Inputs view (see above): one taxable
   account at a time with its broker guidance and a "N required positions to
   go" countdown, then the next incomplete account. The full grid stays
@@ -196,8 +233,9 @@ cards — the ☰ menu opens no window).
 
 - **Buy/sell**: use the Accounts tab buttons (Add / Sell / Close), edit the
   Inputs grid, or fill a template and upload it. Then ☰ → Refresh stocks.
-- **Home value**: ☰ → Refresh home estimates (prefilled prompt; no Zillow
-  scraper — automatic fetching only if a reliable estimate API appears).
+- **Home value**: ☰ → Refresh home estimates (blank until you set it; no
+  Zillow scraper — automatic fetching only if a reliable estimate API
+  appears).
 - **Log** (☰ menu): appends today's close to `drift_log.csv`
   (skips weekends, like the old daily cron). Upserts if run twice.
 - **Cost basis**: fill cost + acquired date per lot (Inputs grid or

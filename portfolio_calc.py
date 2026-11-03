@@ -44,11 +44,12 @@ BASELINE_HOME = 931000
 BASELINE_TOTAL = BASELINE_LIQUID + BASELINE_HOME
 JAN1_PRICES = {"BTC": 87413, "GLD": 398.28, "VTI": 336.31, "MSTR": 157}
 
-HOME_DEFAULT = 853000
+HOME_DEFAULT = 0
 
-# Tax-loss harvesting budget (user-confirmed, Schwab Living Trust ...035).
+# Tax-loss harvesting budget: the $15,000 cap is the rule; year-to-date
+# figures start neutral — the user fills pre-app history in the Profile tab.
 TLH_CAP = 15000
-TLH_GAINS_YTD = 3219.16
+TLH_GAINS_YTD = 0.0
 TLH_LOSSES_YTD = 0.0
 
 
@@ -1004,7 +1005,7 @@ def account_values(lots, prices):
 
 
 def fifty_nine_half(dob):
-    """'Feb 2028' for born-Aug-1968: DOB + 59y6m. '--' when unparseable."""
+    """DOB + 59y6m. '--' when unparseable."""
     try:
         y, m = int(str(dob)[:4]), int(str(dob)[5:7])
     except (ValueError, TypeError):
@@ -1056,10 +1057,11 @@ RETIREMENT_TYPES_UNLOCK65 = ("Traditional IRA", "Roth IRA")
 
 def holdings_by_asset(lots, prices, home_value, home_cost=None):
     """One row per asset aggregated across accounts (open lots only;
-    CASH_USD excluded — cash lives in Liquidity). Avg cost covers KNOWN-cost
-    lots only; unknown-cost shares are counted in `missing` and never
-    averaged in. Gain is computed on the known portion only. Home is one
-    more row (cost = purchase price if known, else value only, no gain).
+    CASH_USD excluded — cash lives in Liquidity). A position's average and
+    gains show ONLY when ALL its open lots have cost (`complete`); partial
+    averages misread as whole-position figures, so incomplete positions
+    report cost as missing instead. Home is one more row (cost = purchase
+    price if known, else value only, no gain) and is always complete.
     Returns ([rows], total_value) sorted by value desc; each row carries
     per-account lot detail for expansion."""
     agg = {}
@@ -1078,18 +1080,22 @@ def holdings_by_asset(lots, prices, home_value, home_cost=None):
     for asset, a in agg.items():
         price = prices.get(asset)
         value = None if price is None else a["shares"] * price
-        avg = a["known_cost"] / a["known_sh"] if a["known_sh"] else None
+        missing = a["shares"] - a["known_sh"]
+        complete = missing <= 1e-9
+        avg = a["known_cost"] / a["known_sh"] if complete and a["known_sh"] \
+            else None
         if price is not None and avg is not None:
             gain = a["known_sh"] * (price - avg)
             gain_pct = gain / a["known_cost"] if a["known_cost"] else None
         else:
             gain, gain_pct = None, None
         rows.append({"asset": asset, "shares": a["shares"],
-                     "missing": a["shares"] - a["known_sh"],
+                     "missing": missing, "complete": complete,
                      "avg_cost": avg, "price": price, "value": value,
                      "gain": gain, "gain_pct": gain_pct,
                      "by_acct": a["by_acct"]})
     rows.append({"asset": "Home (real estate)", "shares": 1.0, "missing": 0.0,
+                 "complete": True,
                  "avg_cost": home_cost, "price": home_value,
                  "value": home_value,
                  "gain": None if home_cost is None
@@ -1150,16 +1156,17 @@ def fifo_sell(lots, account, asset, qty, sold_date, sale_price, cost=None):
 
 # ================= profile (profile.json) =================
 PROFILE_DEFAULTS = {
-    "date_of_birth": "1968-08",
-    "ss_owner_monthly": 1812,
-    "ss_spouse_monthly": 700,
-    "other_realized_gains_current_year": 3219.16,
-    "other_realized_gains_note":
-        "Schwab Living Trust 2026 YTD (pre-app history)",
-    # Sheet-ported annual spending figures (user-confirmed constants, like
-    # the TLH cap below); after-65 all-in adds Social Security live.
-    "spending_before65_annual": 135545,
-    "spending_after65_base_annual": 111900,
+    # Neutral blanks — a fresh copy of the app knows nothing about its
+    # first owner. The user fills these in the Profile tab. NEVER seed
+    # personal values here.
+    "date_of_birth": "",
+    "ss_owner_monthly": 0,
+    "ss_spouse_monthly": 0,
+    "other_realized_gains_current_year": 0.0,
+    "other_realized_gains_note": "",
+    # Annual spending figures; after-65 all-in adds Social Security live.
+    "spending_before65_annual": 0,
+    "spending_after65_base_annual": 0,
     # Home purchase price (optional — Holdings shows value-only without it).
     "home_purchase_price": "",
 }
@@ -1182,8 +1189,8 @@ def save_profile(path, prof):
 
 
 def spending_capacity(prof, today=None):
-    """Live spending figures from the profile. Base annuals are the
-    sheet-ported constants; after-65 all-in adds both SS checks monthly."""
+    """Live spending figures from the profile. Base annuals are user-set;
+    after-65 all-in adds both SS checks monthly."""
     today = today or datetime.date.today()
     dob = str(prof.get("date_of_birth", ""))[:7]
     try:
