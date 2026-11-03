@@ -7,3 +7,4 @@ profile.json
 __pycache__/
 *.pyc
 .venv/
+*-template.csv

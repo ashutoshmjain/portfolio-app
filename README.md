@@ -137,12 +137,28 @@ cards — the ☰ menu opens no window).
   app-wide, over entries and buttons too — as fast as scrollbar drag. Grid
   columns budget to 798px so the full grid fits a 960px split-screen window
   with no horizontal overflow; long gain strings wrap instead of clipping.
-- **Template** — **Download full template** (header only), **Upload**,
-  **Paste rows** (clipboard TSV/CSV), **Import broker CSV** (template-shaped
-  exports import; anything else is plainly rejected, never guessed), and
-  **Copy AI prompt** (ready-made screenshot-to-CSV prompt for any AI). The
-  tab also carries a per-field broker guide (Schwab + Vanguard paths,
-  CSV-export pointers, 1099-B note) as one fast-scrolling text block.
+- **Template** — **Download full template** (header only),
+  **Download filled template** (your current data, filled into the
+  template — a plain CSV for uploading into another copy of the app;
+  defaults to your Downloads folder as
+  `filled-template-YYYYMMDD-HHMM.csv`, never the repo folder; exports the
+  last saved state, so unsaved Inputs edits ask Save & Download /
+  Download saved state / Cancel), **Upload**, **Paste rows** (clipboard
+  TSV/CSV), **Import broker CSV** (template-shaped exports import;
+  anything else is plainly rejected, never guessed), and **Copy AI prompt**
+  (ready-made screenshot-to-CSV prompt for any AI). The tab also carries a
+  per-field broker guide (Schwab + Vanguard paths, CSV-export pointers,
+  1099-B note) as one fast-scrolling text block.
+- **True-up test** — verify a fresh copy of the app reproduces your data:
+  Save, then Template → Download filled template (note open/closed counts,
+  per-account values, liquid total, net worth). Fresh clone (no data files
+  carried over) → install → run → confirm the empty state → upload the
+  file via Upload filled template. Press Refresh stocks in BOTH apps
+  back-to-back, set the same home estimate in the clone (☰ → Refresh home
+  estimates), then compare: lots/shares/cost/counts must match exactly,
+  liquid total and net worth must match. The template carries positions,
+  not prices (the clone fetches its own) and not home value (set it
+  identically in the clone).
 - **Profile** — date of birth, SS amounts, other gains + note, optional home
   purchase price (all editable, so a wrong seed is fixable in place). Shows
   live spending capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.

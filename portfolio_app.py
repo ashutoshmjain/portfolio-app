@@ -2479,6 +2479,9 @@ class App(ctk.CTk):
         ctk.CTkButton(bar, text="Download full template",
                       command=self.download_full_template).pack(
                           side="left", padx=4)
+        ctk.CTkButton(bar, text="Download filled template",
+                      command=self.download_filled_template).pack(
+                          side="left", padx=4)
         ctk.CTkButton(bar, text="Upload filled template",
                       command=self.upload_template).pack(side="left", padx=4)
         ctk.CTkButton(bar, text="Paste rows",
@@ -2488,6 +2491,12 @@ class App(ctk.CTk):
                                                           padx=4)
         ctk.CTkButton(bar, text="Copy AI prompt",
                       command=self.copy_ai_prompt).pack(side="left", padx=4)
+        ctk.CTkLabel(
+            f, text="Download filled template: your current data, filled "
+                   "into the template — upload it into another copy of the "
+                   "app.",
+            text_color=CLR_SECONDARY, wraplength=860,
+            anchor="w").pack(padx=12, anchor="w")
         self.template_msg = ctk.CTkLabel(f, text="", wraplength=860,
                                          anchor="w")
         self.template_msg.pack(padx=8, pady=4, anchor="w")
@@ -2645,6 +2654,47 @@ class App(ctk.CTk):
             self._write_template_csv(path, [])
             self.template_msg.configure(
                 text="Wrote header-only template to %s" % path)
+
+    def _downloads_dir(self):
+        """Default folder for the filled-template save dialog: the user's
+        Downloads folder — never the repo folder."""
+        d = os.path.join(os.path.expanduser("~"), "Downloads")
+        if os.path.isdir(d):
+            return d
+        return os.path.expanduser("~")
+
+    def download_filled_template(self):
+        """Download the full dataset (open + closed lots, all accounts)
+        as a plain CSV in the exact template format, so it can be fed to
+        another copy of the app via Upload filled template. Exports the
+        last SAVED state: unsaved Inputs edits trigger a
+        Save & Download / Download saved state / Cancel choice."""
+        self._ensure_cov_state()
+        if self._cov_counts():
+            choice = messagebox.askyesnocancel(
+                "Unsaved edits",
+                "The Inputs grid has unsaved edits.\n\n"
+                "Yes = Save first, then download.\n"
+                "No = Download the last saved state "
+                "(unsaved edits excluded).\n"
+                "Cancel = go back without downloading.")
+            if choice is None:
+                return
+            if choice and not self._cov_save():
+                self.template_msg.configure(
+                    text="Download cancelled — fix the flagged rows, "
+                         "then save.")
+                return
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+            initialdir=self._downloads_dir(),
+            initialfile="filled-template-%s.csv" % stamp)
+        if path:
+            self._write_template_csv(path, self.lots)
+            self.template_msg.configure(
+                text="Wrote %s with your current data to %s"
+                     % (_n(len(self.lots), "row"), path))
 
     def download_account_template(self, account):
         path = filedialog.asksaveasfilename(
