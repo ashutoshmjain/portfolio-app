@@ -440,6 +440,37 @@ def append_close(path, liquid, home, actual_total, standard_total):
 
 
 # ================= charts =================
+# Dark-theme chart dressing (one place): the app is dark, so figures use
+# the app background with light text. Series colors stay the sheet's blue
+# (target/actual) and red (actual/standard) — legible on dark.
+CHART_BG = "#242424"
+CHART_AXES = "#2B2B2B"
+CHART_TEXT = "#EDEDED"
+CHART_SPINE = "#8A8A8A"
+
+
+def _darken_chart(fig, ax):
+    """Dark figure/axes + scaled-up text (titles, labels, legend, ticks)."""
+    fig.patch.set_facecolor(CHART_BG)
+    ax.set_facecolor(CHART_AXES)
+    for spine in ax.spines.values():
+        spine.set_color(CHART_SPINE)
+    ax.tick_params(colors=CHART_TEXT, labelsize=10)
+    ax.xaxis.label.set_size(11)
+    ax.yaxis.label.set_size(11)
+    ax.xaxis.label.set_color(CHART_TEXT)
+    ax.yaxis.label.set_color(CHART_TEXT)
+    ax.title.set_size(13)
+    ax.title.set_color(CHART_TEXT)
+    leg = ax.get_legend()
+    if leg is not None:
+        leg.get_frame().set_facecolor(CHART_AXES)
+        leg.get_frame().set_edgecolor(CHART_SPINE)
+        for t in leg.get_texts():
+            t.set_color(CHART_TEXT)
+            t.set_size(11)
+
+
 def make_allocation_chart(fig, view3):
     """Target vs Actual column chart across the 5 buckets.
 
@@ -455,7 +486,7 @@ def make_allocation_chart(fig, view3):
     ax.bar([i - w / 2 for i in x], target, w, label="Target %", color="#4285F4")
     ax.bar([i + w / 2 for i in x], actual, w, label="Actual %", color="#EA4335")
     ax.set_xticks(list(x))
-    ax.set_xticklabels(labels, fontsize=9)
+    ax.set_xticklabels(labels, fontsize=11)
     ax.set_ylabel("% of total net worth")
     ax.set_title("Target vs actual allocation (total net worth)")
     ax.set_ylim(0, 50)
@@ -463,6 +494,7 @@ def make_allocation_chart(fig, view3):
     ax.yaxis.set_major_formatter(mticker.PercentFormatter())
     ax.legend(loc="upper right")
     ax.grid(axis="y", alpha=0.3)
+    _darken_chart(fig, ax)
     fig.tight_layout()
     return ax
 
@@ -486,12 +518,13 @@ def make_drift_chart(fig, log_rows):
     ax.set_yticks(range(2000000, 5000001, 100000))
     ax.set_yticklabels(["$%.1fM" % (v / 1e6)
                         for v in range(2000000, 5000001, 100000)],
-                       fontsize=7)
+                       fontsize=9)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d, %Y"))
     fig.autofmt_xdate(rotation=30)
     ax.set_title("Actual vs Standard -- daily close (total net worth)")
     ax.legend(loc="lower left")
     ax.grid(True, alpha=0.3)
+    _darken_chart(fig, ax)
     fig.tight_layout()
     return ax
 
@@ -981,8 +1014,10 @@ def fifty_nine_half(dob):
 def liquidity_by_bank(lots, prices):
     """{normkey: {display, under65, over65, at59half, accounts}} — ONE row
     per institution, grouped case-insensitively. Classified by
-    account_type: Cash/Taxable/HSA → under 65; Traditional/Roth IRA → over
-    65 (and the 59½ subset). Unlock age is 65 throughout."""
+    account_type: Cash/Taxable/HSA → Available now (key under65);
+    Traditional/Roth IRA → Unlocks at 59½ (key over65, == at59half subset).
+    Key names are historical; the Liquidity tab labels them by true access
+    age — 65 appears nowhere on that tab."""
     banks = {}
     for lot in open_lots(lots):
         if lot.get("shares") is None:

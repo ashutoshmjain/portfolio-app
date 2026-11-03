@@ -11,25 +11,29 @@ Data Entry.** The ☰ menu holds exactly three items: Refresh stocks,
 Refresh home estimates, Log.
 
 - **Dashboard** — sub-tabs: **Overview** (landing: net worth, spending
-  capacity, key alerts, Target-vs-actual allocation grouped-bar chart —
-  blue Target %, red Actual %, 5 buckets, 0–50% axis — then navigation
+  capacity, key alerts, then the Actual-vs-Standard daily-close LINE chart
+  — blue Actual total $, red Standard total $, $2M–$5M / $100K steps, same
+  shared implementation and values as Diversification — then navigation
   cards), **Accounts** (bank → account → position quantities, prices,
   values), **Holdings** (ONE expanding table filling the window, one scroll
   region: one row per asset aggregated across accounts, weighted avg cost
   over known-cost lots only; ▶/▼ expands per-account rows in place beneath
   the summary row; home is one more row; cash lives in Liquidity),
-  **Liquidity** (the sheet's Liquidity Plan tab: ONE row per institution —
-  Chase/chase unified case-insensitively — with Available < 65 / Available
-  > 65 / of-which penalty-free at 59½ (Feb 2028, a subset of > 65) / Total;
-  Cash + Taxable + HSA count < 65, Traditional + Roth IRA count > 65;
-  rows expand to accounts; footer has liquid total, home, net worth, and
-  years of before-65 spending covered), **Tax implications** (per-type tax
-  facts, not advice, + your account→type mapping).
+  **Liquidity** (the sheet's Liquidity Plan tab, framed by TRUE access age:
+  ONE row per institution — Chase/chase unified case-insensitively — with
+  Available now / Unlocks at 59½ (Feb 2028) / Total; Cash + Taxable + HSA
+  count as Available now, Traditional + Roth IRA unlock at 59½; rows sum
+  and expand to accounts; footer has liquid total, home, net worth, and
+  years of pre-65 spending covered by available-now money; 65 appears
+  nowhere on this tab — it stays a spending/SS milestone on Overview only),
+  **Tax implications** (per-type tax facts, not advice, + your
+  account→type mapping).
 - **Diversification** — the 15:15:35:15:20 standard + rationale, current
-  position vs standard, the same Target-vs-actual chart (one shared
-  implementation — values tie exactly), rebalance plan (display only —
-  NEVER executes trades), drift chart (Actual vs Standard daily close,
-  Y-axis $2M–$5M, $100K steps — the chart Google Sheets flattened).
+  position vs standard, the Target-vs-actual allocation bar chart (this tab
+  only), rebalance plan (display only — NEVER executes trades), and the
+  same Actual-vs-Standard drift line chart as Overview (one shared
+  implementation — values tie exactly; Y-axis $2M–$5M, $100K steps — the
+  chart Google Sheets flattened).
 - **Tax Harvest** (view title "Tax Loss Harvesting") — per-lot unrealized
   P&L with Long/Short holding term, realized gains from closed lots, $15K
   Medi-Cal gains guardrail + leeway.
@@ -38,6 +42,22 @@ Refresh home estimates, Log.
 Deferred: an Overview news feed (earnings, Fed meetings) waits for the
 AI-embedding phase — raw feeds are noisy and curation is the value. No
 placeholder UI.
+
+## Readability (older eyes, split screen)
+
+- Type scale lives in one place (`FS_BODY` / `FS_HEAD` / `FS_TITLE` /
+  `FS_TABLE_HEAD` in `portfolio_app.py`): body 16px everywhere, headings
+  20px, headline numbers 24px, bold table headers 16px. Every widget
+  without an explicit font inherits body size from the theme default, so
+  buttons and entries are legible with no per-widget edits. (CTk sizes are
+  pixels but tkinter renders points — the values are chosen to land
+  exactly; don't pick odd sizes.)
+- Dark theme kept; body text is always light, secondary rows use a readable
+  light grey (`CLR_SECONDARY`) — never tiny + dim. Tables use generous row
+  padding; charts are dark-dressed with scaled-up titles/labels/legends.
+- Split-screen safe: every tab is verified at 960px window width — no
+  clipped text, no unreachable buttons, no horizontal overflow. Charts
+  track the container width and shrink to fit.
 
 ## Data model — one row per lot
 
@@ -97,7 +117,9 @@ cards — the ☰ menu opens no window).
   row shows live cost/proceeds/gain/term arithmetic. Typing fewer shares is
   a count correction, never a sale. Edit/Lock/Save update rows in place
   (scroll preserved; only Add scrolls). Mouse wheel scrolls 5 units/notch
-  app-wide, over entries and buttons too — as fast as scrollbar drag.
+  app-wide, over entries and buttons too — as fast as scrollbar drag. Grid
+  columns budget to 798px so the full grid fits a 960px split-screen window
+  with no horizontal overflow; long gain strings wrap instead of clipping.
 - **Template** — **Download full template** (header only), **Upload**,
   **Paste rows** (clipboard TSV/CSV), **Import broker CSV** (template-shaped
   exports import; anything else is plainly rejected, never guessed), and

@@ -31,6 +31,25 @@ DRIFT_LOG = os.path.join(HERE, "drift_log.csv")
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
+# ---- app-wide type scale: ONE place, not scattered per-widget values ----
+# Retirement-planner audience skews older: body text >= 15px everywhere,
+# headings a few px above body, bold table headers >= 15px. Widgets without
+# an explicit font inherit FS_BODY via the theme default below, so buttons
+# and entries are legible with no per-widget edits. NOTE: CTk sizes are
+# pixels but tkinter renders points (px * 72/96), so these are chosen to
+# land exactly: 16px -> 12pt -> 16px, 20px -> 15pt -> 20px,
+# 24px -> 18pt -> 24px. Do NOT pick odd values — rounding would shave a
+# pixel off the 15px minimum.
+FS_BODY = 16          # body text minimum, everywhere
+FS_HEAD = 20          # section headings (body + 4)
+FS_TITLE = 24         # top headline numbers
+FS_TABLE_HEAD = 16    # bold table headers
+FS_SMALL = 13         # secondary hints only — never body text
+# Secondary text on dark: light enough to read at body size (never tiny +
+# dim). Body text itself is always the default light color, never this.
+CLR_SECONDARY = "#C9C9C9"
+ctk.ThemeManager.theme["CTkFont"]["size"] = FS_BODY
+
 
 BROKER_GUIDE = [
     {"field": "bank",
@@ -126,7 +145,7 @@ class Table(ctk.CTkScrollableFrame):
         for j, h in enumerate(headers):
             lbl = ctk.CTkLabel(self, text=h, font=ctk.CTkFont(weight="bold"),
                                anchor="w")
-            lbl.grid(row=0, column=j, padx=6, pady=3, sticky="w")
+            lbl.grid(row=0, column=j, padx=4, pady=3, sticky="w")
         for i, row in enumerate(rows, start=1):
             for j, val in enumerate(row):
                 bold = str(val).startswith("**")
@@ -135,7 +154,7 @@ class Table(ctk.CTkScrollableFrame):
                     self, text=text,
                     font=ctk.CTkFont(weight="bold") if bold else None,
                     anchor="w")
-                lbl.grid(row=i, column=j, padx=6, pady=2, sticky="w")
+                lbl.grid(row=i, column=j, padx=4, pady=3, sticky="w")
 
 
 class App(ctk.CTk):
@@ -158,7 +177,7 @@ class App(ctk.CTk):
         top = ctk.CTkFrame(self)
         top.pack(fill="x", padx=10, pady=8)
         ctk.CTkLabel(top, text="PORTFOLIO DASHBOARD",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(
+                     font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
                          side="left", padx=8)
         self.date_lbl = ctk.CTkLabel(
             top, text="As of %s" % datetime.date.today().isoformat())
@@ -425,6 +444,40 @@ class App(ctk.CTk):
             and lot.get("asset") != pc.CASH_ASSET
             and (lot.get("cost") is None or not lot.get("acquired")))
 
+    def _chart_canvas(self, master, fig, aspect=0.46, min_h=300):
+        """Embed a matplotlib figure that tracks its container's width.
+
+        Split-screen safety: at ~960px window width a fixed 1000px figure
+        would clip. On <Configure> (settled by a 20px threshold) the figure
+        is resized to the widget width and redrawn; draw_idle emits no
+        further Configure, so this converges after one step.
+        """
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        canvas = FigureCanvasTkAgg(fig, master=master)
+        widget = canvas.get_tk_widget()
+        widget.pack(fill="both", expand=True, padx=10, pady=6)
+        state = {"w": 0}
+
+        def _fit(_e=None):
+            try:
+                w = widget.winfo_width()
+            except tk.TclError:
+                return
+            if w < 50 or abs(w - state["w"]) < 20:
+                return
+            state["w"] = w
+            try:
+                fig.set_size_inches(w / fig.get_dpi(),
+                                    max(min_h, w * aspect) / fig.get_dpi(),
+                                    forward=True)
+                fig.tight_layout()
+            except (ValueError, tk.TclError):
+                pass
+            canvas.draw_idle()
+
+        widget.bind("<Configure>", _fit, add="+")
+        return canvas
+
     def build_overview(self):
         f = self._clear_dash("Overview")
         tnw = self.data["tnw"]
@@ -437,14 +490,14 @@ class App(ctk.CTk):
         leeway = pc.TLH_CAP - realized
         missing = self._required_missing()
         ctk.CTkLabel(f, text="Total net worth: %s" % money(tnw),
-                     font=ctk.CTkFont(size=22, weight="bold")).pack(
+                     font=ctk.CTkFont(size=FS_TITLE, weight="bold")).pack(
                          padx=10, pady=(10, 2), anchor="w")
         ctk.CTkLabel(
             f, text="Allowed spending: %s/yr before 65 · %s/yr after 65 "
                     "(base %s + Social Security)." % (
                         money(sp["before65"]), money(sp["after65_allin"]),
                         money(sp["after65_base"])),
-            font=ctk.CTkFont(size=14)).pack(padx=10, pady=2, anchor="w")
+            font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2, anchor="w")
         alerts = [
             "Drift vs standard: actual %s vs standard %s (%s)." % (
                 pct(d["actual_ytd"]), pct(d["standard_ytd"]),
@@ -457,14 +510,13 @@ class App(ctk.CTk):
         for alert in alerts:
             ctk.CTkLabel(f, text="• " + alert, wraplength=1100,
                          anchor="w").pack(padx=10, pady=1, anchor="w")
-        # Primary visual: the sheet's grouped-bar allocation chart, same
-        # shared implementation (and numbers) as Diversification.
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        # Primary visual: the Actual-vs-Standard daily-close LINE chart —
+        # the same shared implementation (and values) as Diversification.
+        # The allocation bar chart lives in Diversification only.
         from matplotlib.figure import Figure
-        fig = Figure(figsize=(10, 3.6), dpi=100)
-        pc.make_allocation_chart(fig, self.data["view3"])
-        FigureCanvasTkAgg(fig, master=f).get_tk_widget().pack(
-            fill="both", padx=10, pady=6)
+        fig = Figure(figsize=(10, 4.6), dpi=100)
+        pc.make_drift_chart(fig, pc.load_drift_log(DRIFT_LOG))
+        self._chart_canvas(f, fig)
         ctk.CTkLabel(f, text="Go to:",
                      font=ctk.CTkFont(weight="bold")).pack(padx=10,
                                                            pady=(10, 2),
@@ -583,8 +635,8 @@ class App(ctk.CTk):
             widths = [150, 90, 170, 90, 100, 90, 80]
             for col, (txt, w) in enumerate(zip(cells, widths)):
                 ctk.CTkLabel(detail, text=txt, width=w, anchor="w",
-                             text_color="gray").grid(row=ri, column=col + 1,
-                                                    padx=2, sticky="w")
+                             text_color=CLR_SECONDARY).grid(
+                                 row=ri, column=col + 1, padx=2, sticky="w")
 
     def _hold_toggle(self, box, detail, r, btn):
         if r["asset"] in self._hold_expanded:
@@ -636,18 +688,21 @@ class App(ctk.CTk):
                       command=self.reopen_form).pack(side="left", padx=4)
 
     def build_liquidity(self):
-        # The sheet's Liquidity Plan tab, rebuilt: ONE row per institution
-        # (cash-flow access before/after IRAs unlock), expandable to
-        # accounts. Unlock age 65 throughout; the 59½ column is an "of
-        # which" SUBSET of > 65, so rows still sum < 65 + > 65 = Total.
+        # The sheet's Liquidity Plan tab, rebuilt: ONE row per institution,
+        # framed by TRUE access ages. Cash/Taxable/HSA are Available now;
+        # Traditional/Roth IRA unlock penalty-free at 59½ (Feb 2028) — 65
+        # is a spending/SS milestone on Overview only, never a gate here.
+        # Rows sum Available now + Unlocks at 59½ = Total. No model change:
+        # the calc keys (under65/over65) already hold exactly these two
+        # buckets, relabeled here.
         f = self._clear_dash("Liquidity")
         if getattr(self, "_liq_expanded", None) is None:
             self._liq_expanded = set()
         ctk.CTkLabel(
-            f, text="Access to funds — what you can reach before 65 vs "
-                    "after IRAs unlock.",
-            font=ctk.CTkFont(size=14, weight="bold")).pack(padx=6, pady=(6, 2),
-                                                           anchor="w")
+            f, text="Access to funds — what you can reach now, and what "
+                    "unlocks penalty-free at 59½.",
+            font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
+                padx=6, pady=(6, 2), anchor="w")
         banks = pc.liquidity_by_bank(self.lots, self.prices)
         scroll = ctk.CTkScrollableFrame(f)
         scroll.pack(fill="both", expand=True, padx=6, pady=6)
@@ -655,16 +710,16 @@ class App(ctk.CTk):
         header = ctk.CTkFrame(scroll, fg_color="transparent")
         header.pack(fill="x", padx=4)
         for col, (txt, w) in enumerate(
-                [("", 30), ("Institution", 170), ("Available < 65", 130),
-                 ("Available > 65", 130), ("of which penalty-free at 59½",
-                                           170), ("Total", 130)]):
+                [("", 30), ("Institution", 170), ("Available now", 130),
+                 ("Unlocks at 59½", 150), ("Total", 130)]):
             ctk.CTkLabel(header, text=txt, width=w,
-                         font=ctk.CTkFont(weight="bold")).grid(
+                         font=ctk.CTkFont(size=FS_TABLE_HEAD,
+                                          weight="bold")).grid(
                              row=0, column=col, padx=2, sticky="w")
         for norm in sorted(banks, key=lambda k: -banks[k]["total"]):
             b = banks[norm]
             box = ctk.CTkFrame(scroll)
-            box.pack(fill="x", padx=4, pady=1)
+            box.pack(fill="x", padx=4, pady=3)
             line = ctk.CTkFrame(box, fg_color="transparent")
             line.pack(fill="x")
             expanded = norm in self._liq_expanded
@@ -674,8 +729,8 @@ class App(ctk.CTk):
             btn.grid(row=0, column=0, padx=2)
             for col, txt in enumerate(
                     [b["display"], money(b["under65"]), money(b["over65"]),
-                     money(b["at59half"]), money(b["total"])]):
-                ctk.CTkLabel(line, text=txt, width=[170, 130, 130, 170,
+                     money(b["total"])]):
+                ctk.CTkLabel(line, text=txt, width=[170, 130, 150,
                                                    130][col],
                              anchor="w").grid(row=0, column=col + 1, padx=2,
                                               sticky="w")
@@ -685,11 +740,12 @@ class App(ctk.CTk):
                     a = b["accounts"][acct]
                     for col, txt in enumerate(
                             ["    " + acct, money(a["under"]),
-                             money(a["over"]), "",
+                             money(a["over"]),
                              money(a["under"] + a["over"])]):
-                        ctk.CTkLabel(detail, text=txt, width=[170, 130, 130,
-                                                             170, 130][col],
-                                     anchor="w", text_color="gray").grid(
+                        ctk.CTkLabel(detail, text=txt, width=[170, 130, 150,
+                                                             130][col],
+                                     anchor="w",
+                                     text_color=CLR_SECONDARY).grid(
                                          row=ri, column=col + 1, padx=2,
                                          sticky="w")
                 detail.pack(fill="x", padx=4, pady=2)
@@ -699,9 +755,10 @@ class App(ctk.CTk):
         sp = pc.spending_capacity(self.profile)
         years = (under / sp["before65"]) if sp["before65"] else None
         ctk.CTkLabel(
-            f, text="Totals: < 65 %s · > 65 %s · liquid %s · home %s · net "
-                    "worth %s. < 65 total ÷ %s/yr before-65 spending = %s "
-                    "years of spending covered until 65."
+            f, text="Totals: available now %s · unlocks at 59½ %s · liquid "
+                    "%s · home %s · net worth %s. Available-now total ÷ "
+                    "%s/yr before-65 spending = %s years of pre-65 spending "
+                    "covered by available-now money."
                     % (money(under), money(over), money(liquid),
                        money(self.home_value), money(self.data["tnw"]),
                        money(sp["before65"]),
@@ -764,7 +821,6 @@ class App(ctk.CTk):
               ).pack(fill="both", expand=True, padx=6, pady=6)
 
     def build_diversification(self):
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.figure import Figure
         f = self._clear("Diversification")
         ctk.CTkLabel(
@@ -788,8 +844,7 @@ class App(ctk.CTk):
               rows).pack(fill="both", padx=6, pady=6)
         fig1 = Figure(figsize=(10, 4.2), dpi=100)
         pc.make_allocation_chart(fig1, self.data["view3"])
-        FigureCanvasTkAgg(fig1, master=f).get_tk_widget().pack(
-            fill="both", padx=6, pady=6)
+        self._chart_canvas(f, fig1, aspect=0.42)
         ctk.CTkLabel(
             f, text="REBALANCE PLAN (display only, NEVER executes "
                     "trades). All 4 trades inside Schwab Ashu IRA: $0 tax, "
@@ -833,13 +888,12 @@ class App(ctk.CTk):
                      anchor="w").pack(padx=6, pady=6, anchor="w")
         fig2 = Figure(figsize=(10, 8.5), dpi=100)
         pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG))
-        FigureCanvasTkAgg(fig2, master=f).get_tk_widget().pack(
-            fill="both", expand=True, padx=6, pady=6)
+        self._chart_canvas(f, fig2, aspect=0.85, min_h=400)
 
     def build_tax(self):
         f = self._clear("Tax Harvest")
         ctk.CTkLabel(f, text="Tax Loss Harvesting",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(
+                     font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
                          padx=6, pady=(6, 0), anchor="w")
         year = datetime.date.today().year
         prices = self.prices
@@ -863,7 +917,7 @@ class App(ctk.CTk):
                          else "$%.2f" % lot["cost"],
                          "--" if price is None else "$%.2f" % price,
                          money(value),
-                         "cost or acquired date needed" if pnl is None
+                         "need cost/date" if pnl is None
                          else money(pnl),
                          term or "--", ""])
         losers.sort()
@@ -893,9 +947,7 @@ class App(ctk.CTk):
         Table(f, ["%d capital-gains budget (Medi-Cal: keep net gains "
                   "under $15K/yr)" % year, "$"],
               [["Annual net-gains cap (your $15K guardrail)", money(cap)],
-               ["Pre-app realized gains (%s)"
-                % self.profile.get("other_realized_gains_note", ""),
-                money(other)],
+               ["Pre-app realized gains (full note in Profile)", money(other)],
                ["Realized from sold lots above", money(total - other)],
                ["**Net realized YTD", "**" + money(total)],
                ["**Remaining budget (leeway)", "**" + money(cap - total)]],
@@ -953,7 +1005,7 @@ class App(ctk.CTk):
             top, text="Holdings %d/%d · Cost %d/%d · Acquired dates %d/%d" % (
                 t["holdings_ok"], t["holdings_n"], t["cost_ok"], t["cost_n"],
                 t["acq_ok"], t["acq_n"]),
-            font=ctk.CTkFont(size=15, weight="bold"))
+            font=ctk.CTkFont(size=FS_BODY, weight="bold"))
         self.cov_progress.pack(side="left", padx=4)
         n = self._cov_counts()
         self.cov_save_btn = ctk.CTkButton(
@@ -990,7 +1042,7 @@ class App(ctk.CTk):
         if not self.cov_lots:
             ctk.CTkLabel(
                 f, text="No accounts yet.",
-                font=ctk.CTkFont(size=16, weight="bold")).pack(
+                font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
                     padx=8, pady=(24, 4))
             ctk.CTkButton(f, text="Add your first bank / account",
                           width=240,
@@ -1013,7 +1065,7 @@ class App(ctk.CTk):
                     a == self.cov_filter for a in groups[bank]):
                 continue
             ctk.CTkLabel(scroll, text=bank,
-                         font=ctk.CTkFont(size=14, weight="bold")).pack(
+                         font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
                              padx=6, pady=(10, 2), anchor="w")
             for acct in sorted(groups[bank]):
                 if self.cov_filter and acct != self.cov_filter:
@@ -1057,10 +1109,12 @@ class App(ctk.CTk):
                                                              padx=4)
         hdr = ctk.CTkFrame(box, fg_color="transparent")
         hdr.pack(fill="x", padx=6)
+        # Column budget: 798px + 44 grid padx + 24 frame chrome = 866,
+        # inside a ~869px viewport at 960px window width (split screen).
         for col, (txt, w) in enumerate(
-                [("Asset", 110), ("Shares", 80), ("Cost $", 80),
-                 ("Acquired", 120), ("Sold", 120), ("Sale $", 80),
-                 ("", 175), ("", 24), ("", 52), ("", 52), ("", 40)]):
+                [("Asset", 96), ("Shares", 62), ("Cost $", 62),
+                 ("Acquired", 96), ("Sold", 96), ("Sale $", 62),
+                 ("", 190), ("", 18), ("", 48), ("", 38), ("", 30)]):
             ctk.CTkLabel(hdr, text=txt, width=w,
                          font=ctk.CTkFont(weight="bold")).grid(
                              row=0, column=col, padx=2)
@@ -1094,7 +1148,7 @@ class App(ctk.CTk):
         # and the section header — not as grid columns (fix 3).
         rid = row["_rid"]
         fr = ctk.CTkFrame(box, fg_color="transparent")
-        fr.pack(fill="x", padx=6, pady=1)
+        fr.pack(fill="x", padx=6, pady=2)
         W = self.cov_widgets.setdefault(rid, {})
         W["frame"] = fr
         try:
@@ -1126,11 +1180,11 @@ class App(ctk.CTk):
         acell.grid(row=0, column=0, padx=2)
         avals = assets + ["< new >"]
         amenu = ctk.CTkOptionMenu(
-            acell, width=110, values=avals,
+            acell, width=96, values=avals,
             command=lambda v, r=rid: self._cov_menu(r, "asset", v))
         amenu.pack()
         anew_var = tk.StringVar()
-        anew = ctk.CTkEntry(acell, width=110, textvariable=anew_var)
+        anew = ctk.CTkEntry(acell, width=96, textvariable=anew_var)
         cur_a = row.get("asset") or ""
         if cur_a in assets:
             amenu.set(cur_a)
@@ -1170,8 +1224,8 @@ class App(ctk.CTk):
             W["cash_note"].grid(row=0, column=2, columnspan=4, padx=2,
                                 sticky="w")
         else:
-            sh_ent, sh_var = entry(fr, 1, 80, row.get("shares"))
-            co_ent, co_var = entry(fr, 2, 80, row.get("cost"))
+            sh_ent, sh_var = entry(fr, 1, 62, row.get("shares"))
+            co_ent, co_var = entry(fr, 2, 62, row.get("cost"))
             W.update(shares=sh_ent, shares_var=sh_var, cost=co_ent,
                      cost_var=co_var)
             for _e in (sh_ent, co_ent):
@@ -1186,9 +1240,9 @@ class App(ctk.CTk):
             acell2 = ctk.CTkFrame(fr, fg_color="transparent")
             acell2.grid(row=0, column=col, padx=2)
             var = tk.StringVar(value=row.get(field) or "")
-            ent = ctk.CTkEntry(acell2, width=88, textvariable=var)
+            ent = ctk.CTkEntry(acell2, width=70, textvariable=var)
             ent.pack(side="left")
-            btn = ctk.CTkButton(acell2, text="\U0001F4C5", width=28,
+            btn = ctk.CTkButton(acell2, text="\U0001F4C5", width=24,
                                 command=lambda r=rid, f=field:
                                 self._cov_calendar(r, f))
             btn.pack(side="left", padx=1)
@@ -1203,31 +1257,34 @@ class App(ctk.CTk):
         if not is_cash:
             date_cell(3, "acquired")
             date_cell(4, "sold_date")
-            sa_ent, sa_var = entry(fr, 5, 80, row.get("sale_price"))
+            sa_ent, sa_var = entry(fr, 5, 62, row.get("sale_price"))
             W.update(sale_price=sa_ent, sale_price_var=sa_var)
             snap(sa_ent)
             sa_var.trace_add(
                 "write", lambda *_a, r=rid: self._cov_typed(r, "sale_price"))
             nav.append(sa_ent)
 
-        math = ctk.CTkLabel(fr, text="", width=175, anchor="w")
+        # wraplength: long gain strings wrap to two lines instead of
+        # clipping — no clipped text at split-screen width.
+        math = ctk.CTkLabel(fr, text="", width=190, wraplength=190,
+                            anchor="w")
         math.grid(row=0, column=6, padx=2)
         W["math"] = math
         try:
             W["math_def"] = math.cget("text_color")
         except tk.TclError:
             W["math_def"] = None
-        marker = ctk.CTkLabel(fr, text="●", width=24, text_color="orange")
+        marker = ctk.CTkLabel(fr, text="●", width=18, text_color="orange")
         marker.grid(row=0, column=7, padx=2)
         W["marker"] = marker
-        edit = ctk.CTkButton(fr, text="Edit", width=52,
+        edit = ctk.CTkButton(fr, text="Edit", width=48,
                              command=lambda r=rid: self._cov_toggle_lock(r))
         edit.grid(row=0, column=8, padx=2)
         W["edit"] = edit
-        ctk.CTkButton(fr, text="Del", width=52,
+        ctk.CTkButton(fr, text="Del", width=38,
                       command=lambda r=rid: self._cov_delete(r)).grid(
                           row=0, column=9, padx=2)
-        move = ctk.CTkButton(fr, text="↗", width=40,
+        move = ctk.CTkButton(fr, text="↗", width=30,
                              command=lambda r=rid: self._cov_toggle_move(r))
         move.grid(row=0, column=10, padx=2)
         W["move"] = move
@@ -2117,7 +2174,7 @@ class App(ctk.CTk):
                 panel,
                 text="All required accounts fed — Show all to review the "
                      "full grid.",
-                font=ctk.CTkFont(size=14, weight="bold")).pack(
+                font=ctk.CTkFont(size=FS_BODY, weight="bold")).pack(
                     padx=8, pady=8, anchor="w")
             bar = ctk.CTkFrame(panel, fg_color="transparent")
             bar.pack(fill="x", padx=8, pady=(0, 6))
@@ -2128,7 +2185,7 @@ class App(ctk.CTk):
         left = self._cov_totals()["required_left"]
         self.cov_count_lbl = ctk.CTkLabel(
             panel, text="%d required positions to go" % left,
-            font=ctk.CTkFont(size=14, weight="bold"))
+            font=ctk.CTkFont(size=FS_BODY, weight="bold"))
         self.cov_count_lbl.pack(padx=8, pady=(6, 2), anchor="w")
         ctk.CTkLabel(
             panel, text="Feeding: %s — save this account, then take the "
