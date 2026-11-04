@@ -60,6 +60,14 @@ FS_SMALL = 13         # secondary hints only — never body text
 # dim). Body text itself is always the default light color, never this.
 CLR_SECONDARY = "#C9C9C9"
 ctk.ThemeManager.theme["CTkFont"]["size"] = FS_BODY
+# Minimum canvas width (px) before a chart may lay out and draw. At cold
+# start the canvas reports transient near-zero widths while the window is
+# still being mapped; shrinking the figure to those widths and drawing is
+# what collapsed the layout engine to zero (tight_layout warned first,
+# constrained warned next). The figure keeps its creation size until the
+# canvas reports a real width — floor is below every supported window
+# (960px split-screen lands ~900px here).
+_MIN_CHART_W = 600
 
 
 BROKER_GUIDE = [
@@ -147,8 +155,13 @@ def pct(x):
     return pc.fmt_pct(x)
 
 
-class Table(ctk.CTkScrollableFrame):
+class Table(ctk.CTkFrame):
     """Simple grid table: header row bold, values as labels.
+
+    A plain full-height frame, NOT a scrollable: tables render at their
+    complete content height inside the view's single scroll region. One
+    view = one scrollbar — nested scroll regions fought over mouse-wheel
+    events and looked antiquated, so no table carries its own scrollbar.
 
     Every table carries a Copy button (header toolbar, above the grid so
     it never widens the columns): TSV to the clipboard, pasting straight
@@ -218,6 +231,7 @@ class App(ctk.CTk):
         self.prices = pc.load_price_cache(CACHE)
         self.watch = pc.load_watchlist_cache(CACHE)
         self.home_value = pc.HOME_DEFAULT
+        self._sync_home()
         self.data = None
         self.cov_lots = None
         self.status_var = tk.StringVar(value="Ready — open the ☰ menu.")
@@ -529,37 +543,196 @@ class App(ctk.CTk):
         self._close_menu()
         self.open_settings()
 
+    # ---- home value: Properties list + RentCast auto-estimates ----
+    def _properties(self):
+        props = self.profile.get("properties") or []
+        return [dict(p) for p in props if isinstance(p, dict)]
+
+    def _home_total(self):
+        total = 0.0
+        for p in self._properties():
+            try:
+                total += float(p.get("applied_value") or 0)
+            except (TypeError, ValueError):
+                pass
+        return total
+
+    def _sync_home(self):
+        # The applied value is what flows into Holdings, net worth and
+        # drift. Session scalar stays the single source those views read.
+        self.home_value = self._home_total()
+
+    def _home_rows(self):
+        """[(label, applied)] for Holdings: one row per property. Label is
+        the address, falling back to the legacy single-home name."""
+        rows = []
+        for p in self._properties():
+            try:
+                val = float(p.get("applied_value") or 0)
+            except (TypeError, ValueError):
+                val = 0.0
+            label = (p.get("address") or "").strip() or \
+                "Home (real estate)"
+            rows.append((label, val))
+        return rows
+
     def home_from_menu(self):
         self._close_menu()
         win = ctk.CTkToplevel(self)
-        win.title("Home estimate")
+        win.title("Refresh home estimates")
         win.transient(self)
         win.resizable(False, False)
-        ctk.CTkLabel(win, text="Latest home value estimate $ "
-                               "(e.g. from Zillow):").pack(padx=12,
-                                                           pady=(12, 2),
-                                                           anchor="w")
-        ent = ctk.CTkEntry(win, width=200)
-        ent.insert(0, "" if not self.home_value else str(self.home_value))
-        ent.pack(padx=12, pady=2, anchor="w")
-        msg = ctk.CTkLabel(win, text="", text_color="orange")
+        ctk.CTkLabel(win, text="Latest home value estimate:").pack(
+            padx=12, pady=(12, 2), anchor="w")
+        # Fetches per property and SHOWS the pulled value + source +
+        # date — it never silently replaces anything. The user accepts the
+        # pulled value or overwrites the applied value manually (e.g. after
+        # checking Zillow or Redfin in the browser), then Save applies it.
+        # RentCast is called ONLY here — never in the background, never on
+        # app start.
+        props = self._properties()
+        if not props:
+            ctk.CTkLabel(
+                win, text="No properties yet — add one in Settings "
+                          "(Properties), then Refresh.",
+                wraplength=360, anchor="w").pack(padx=12, pady=12,
+                                                anchor="w")
+            ctk.CTkButton(win, text="Close",
+                          command=win.destroy).pack(padx=12, pady=(0, 12),
+                                                   fill="x")
+            win.after(50, lambda: (win.deiconify(), win.lift())
+                      if win.winfo_exists() else None)
+            return
+        key = (self.profile.get("rentcast_key") or "").strip()
+        rows = []
+        for p in props:
+            box = ctk.CTkFrame(win, fg_color="transparent")
+            box.pack(fill="x", padx=12, pady=4)
+            ctk.CTkLabel(
+                box, text=(p.get("address") or "(no address)").strip() or
+                "(no address)",
+                font=ctk.CTkFont(weight="bold"),
+                wraplength=380, anchor="w").pack(anchor="w")
+            line = ctk.CTkFrame(box, fg_color="transparent")
+            line.pack(fill="x", pady=2)
+            ctk.CTkLabel(line, text="Applied $").pack(side="left")
+            applied = ctk.CTkEntry(line, width=140)
+            try:
+                cur = float(p.get("applied_value") or 0)
+                if cur:
+                    applied.insert(0, str(p.get("applied_value")))
+            except (TypeError, ValueError):
+                pass
+            applied.pack(side="left", padx=4)
+            use_btn = ctk.CTkButton(line, text="Use estimate", width=110,
+                                    state="disabled")
+            use_btn.pack(side="left", padx=4)
+            pulled = ctk.CTkLabel(box, text="Fetching…", anchor="w",
+                                  text_color=CLR_SECONDARY,
+                                  wraplength=380)
+            pulled.pack(anchor="w")
+            rows.append({"prop": p, "applied": applied,
+                         "use_btn": use_btn, "pulled": pulled,
+                         "result": None})
+        quota_lbl = ctk.CTkLabel(win, text="", anchor="w",
+                                 text_color=CLR_SECONDARY, wraplength=380)
+        quota_lbl.pack(padx=12, anchor="w")
+        msg = ctk.CTkLabel(win, text="", text_color="orange",
+                           wraplength=380, anchor="w")
         msg.pack(padx=12, anchor="w")
 
-        def apply():
-            try:
-                self.home_value = float(ent.get().replace(",", "")
-                                        .replace("$", ""))
-            except ValueError:
-                msg.configure(text="Not a number — kept previous.")
+        def finish(result_list):
+            if not win.winfo_exists():
                 return
-            win.destroy()
+            quota = ""
+            for i, res in enumerate(result_list):
+                rows[i]["result"] = res
+                if res["error"] and res["price"] is None:
+                    rows[i]["pulled"].configure(text=res["error"])
+                else:
+                    tail = (" — %s" % res["error"]) if res["error"] else ""
+                    rows[i]["pulled"].configure(
+                        text="RentCast: %s (as of %s)%s" % (
+                            money(res["price"]), res["asof"], tail))
+                    rows[i]["use_btn"].configure(
+                        state="normal",
+                        command=lambda r=rows[i]: (
+                            r["applied"].delete(0, "end"),
+                            r["applied"].insert(
+                                0, str(r["result"]["price"]))))
+                if res.get("quota"):
+                    quota = res["quota"]
+            if quota:
+                quota_lbl.configure(text=quota)
+
+        if not key:
+            for r in rows:
+                last = r["prop"].get("last_estimate")
+                if last:
+                    r["pulled"].configure(
+                        text="Last: %s (%s, %s). Add your free RentCast "
+                             "key in Settings, then Refresh for a live "
+                             "estimate."
+                             % (money(last), r["prop"].get("last_source")
+                                or "?", r["prop"].get("last_asof") or "?"))
+                else:
+                    r["pulled"].configure(
+                        text="No RentCast key — add your free Developer key "
+                             "in Settings, then Refresh.")
+        else:
+            snapshots = [(p.get("address") or "") for p in props]
+            box_q = queue.Queue()
+
+            def work():
+                box_q.put([pc.fetch_rentcast_estimate(a, key)
+                           for a in snapshots])
+
+            threading.Thread(target=work, daemon=True).start()
+
+            def poll():
+                if not win.winfo_exists():
+                    return
+                try:
+                    finish(box_q.get_nowait())
+                except queue.Empty:
+                    win.after(150, poll)
+
+            win.after(150, poll)
+
+        def save():
+            new_props = []
+            for r in rows:
+                raw = r["applied"].get().strip().replace(",", "").replace(
+                    "$", "")
+                try:
+                    applied = float(raw or 0)
+                except ValueError:
+                    msg.configure(text="Applied values must be numbers — "
+                                       "nothing saved.")
+                    return
+                prop = dict(r["prop"])
+                prop["applied_value"] = applied
+                if r["result"] and r["result"]["price"] is not None:
+                    prop["last_estimate"] = r["result"]["price"]
+                    prop["last_source"] = r["result"]["source"]
+                    prop["last_asof"] = r["result"]["asof"]
+                new_props.append(prop)
+            self.profile["properties"] = new_props
+            pc.save_profile(PROFILE_JSON, self.profile)
+            self._sync_home()
             self.recompute()
             self.build_all()
+            self.refresh_data_window()
+            win.destroy()
             self.status_var.set("Home updated to %s."
                                 % money(self.home_value))
 
-        ctk.CTkButton(win, text="Apply", command=apply).pack(
-            padx=12, pady=(4, 12), fill="x")
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(fill="x", padx=12, pady=(4, 12))
+        ctk.CTkButton(bar, text="Save applies", width=130,
+                      command=save).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(bar, text="Cancel", width=110,
+                      command=win.destroy).pack(side="left")
         win.after(50, lambda: (win.deiconify(), win.lift())
                   if win.winfo_exists() else None)
 
@@ -807,7 +980,21 @@ class App(ctk.CTk):
                 w = widget.winfo_width()
             except tk.TclError:
                 return
-            if w < 50 or abs(w - state["w"]) < 20:
+            if w < _MIN_CHART_W:
+                # No real size yet (cold-start transient, or a window
+                # narrower than any supported layout): never shrink the
+                # figure here and never draw — that first draw at a
+                # degenerate size is the collapse the warning reported.
+                # One bounded idle retry covers a canvas that never fires
+                # another Configure.
+                if state["w"] == 0 and state.get("retry", 0) < 8:
+                    state["retry"] = state.get("retry", 0) + 1
+                    try:
+                        widget.after(250, lambda: _fit(None))
+                    except tk.TclError:
+                        pass
+                return
+            if abs(w - state["w"]) < 20:
                 return
             state["w"] = w
             try:
@@ -870,7 +1057,7 @@ class App(ctk.CTk):
                           width=240,
                           command=self._cov_add_account).pack(
                               padx=10, pady=4, anchor="w")
-            ctk.CTkButton(body, text="Upload a filled template",
+            ctk.CTkButton(body, text="Upload",
                           width=240,
                           command=self._goto_template).pack(
                               padx=10, pady=4, anchor="w")
@@ -1122,9 +1309,13 @@ class App(ctk.CTk):
         f = self._clear_dash("Holdings")
         if getattr(self, "_hold_expanded", None) is None:
             self._hold_expanded = set()
+        # One Holdings row per property (today: one home row). Purchase-
+        # price gain math only in the single-property case.
+        home_rows = self._home_rows()
         rows, _total = pc.holdings_by_asset(
             self.lots, self.prices, self.home_value,
-            self.profile.get("home_purchase_price") or None)
+            self.profile.get("home_purchase_price") or None,
+            homes=home_rows or None)
         scroll = ctk.CTkScrollableFrame(f)
         scroll.pack(fill="both", expand=True, padx=6, pady=6)
         header = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -1147,8 +1338,9 @@ class App(ctk.CTk):
                     "cost — otherwise Avg reads upload (hover for the "
                     "missing count) and gains read --. The table is a "
                     "checklist: upload the missing cost data in Data Entry. "
-                    "Cash lives in Liquidity. Home is one more row (value "
-                    "only unless a purchase price is set in Settings). "
+                    "Cash lives in Liquidity. Home is one row per property "
+                    "(value only unless a purchase price is set in "
+                    "Settings). "
                     "Click ▶ on a row for its per-account breakdown.",
             wraplength=860, anchor="w").pack(padx=6, pady=6, anchor="w")
 
@@ -1291,9 +1483,13 @@ class App(ctk.CTk):
                      strong(m["Gold & silver"]), strong(m["Equities"]),
                      strong(m["Cash & cash-like"]), strong(m["re"]),
                      strong(1.0 if t["total"] else None), ""])
-        Table(f, ["Account", "BTC", "Gold", "Equities", "Cash-like",
-                  "Real Estate", "Total", "% of portfolio"],
-              rows).pack(fill="both", expand=True, padx=6, pady=6)
+        # One scroll region for the view: the full-height table lives in
+        # a single scrollable; the action bar stays fixed below it.
+        body = ctk.CTkScrollableFrame(f)
+        body.pack(fill="both", expand=True, padx=6, pady=6)
+        Table(body, ["Account", "BTC", "Gold", "Equities", "Cash-like",
+                     "Real Estate", "Total", "% of portfolio"],
+              rows).pack(fill="x", padx=6, pady=6)
         bar = ctk.CTkFrame(f)
         bar.pack(fill="x", padx=6, pady=6)
         ctk.CTkButton(bar, text="Add position",
@@ -1446,11 +1642,14 @@ class App(ctk.CTk):
 
     def build_taximplic(self):
         f = self._clear_dash("Tax implications")
+        # One scroll region for the view (both tables full-height inside).
+        body = ctk.CTkScrollableFrame(f)
+        body.pack(fill="both", expand=True)
         self._selectable_note(
-            f, "What each account type means for tax and withdrawals "
-               "(facts, not advice).",
+            body, "What each account type means for tax and withdrawals "
+                  "(facts, not advice).",
             padx=6, pady=6, fill="x")
-        Table(f, ["Account type", "Tax / withdrawal treatment"],
+        Table(body, ["Account type", "Tax / withdrawal treatment"],
               [["**" + t, self.TAX_TYPE_NOTES[t]] for t in
                ("Traditional IRA", "Roth IRA", "Taxable", "HSA", "Cash")]
               ).pack(fill="x", padx=6, pady=6)
@@ -1458,9 +1657,9 @@ class App(ctk.CTk):
         for lot in self.lots:
             seen.setdefault(lot.get("account"),
                             lot.get("account_type") or "?")
-        Table(f, ["Account", "Type"],
+        Table(body, ["Account", "Type"],
               [[a, seen[a]] for a in sorted(seen)]
-              ).pack(fill="both", expand=True, padx=6, pady=6)
+              ).pack(fill="x", padx=6, pady=6)
 
     def build_diversification(self):
         from matplotlib.figure import Figure
@@ -1545,6 +1744,9 @@ class App(ctk.CTk):
         ctk.CTkLabel(f, text="Tax Loss Harvesting",
                      font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
                          padx=6, pady=(6, 0), anchor="w")
+        # One scroll region for the view: all tables full-height inside.
+        body = ctk.CTkScrollableFrame(f)
+        body.pack(fill="both", expand=True)
         year = datetime.date.today().year
         prices = self.prices
         rows = []
@@ -1573,9 +1775,10 @@ class App(ctk.CTk):
         losers.sort()
         for rank, (_, i) in enumerate(losers, start=1):
             rows[i][-1] = str(rank)
-        Table(f, ["Asset", "Account", "Shares", "Cost/share $", "Price now",
-                  "Value $", "Unrealized P&L $", "Term", "Harvest rank"],
-              rows).pack(fill="both", expand=True, padx=6, pady=6)
+        Table(body, ["Asset", "Account", "Shares", "Cost/share $",
+                     "Price now", "Value $", "Unrealized P&L $", "Term",
+                     "Harvest rank"],
+              rows).pack(fill="x", padx=6, pady=6)
         total, unknown, sold_rows = pc.realized_gains_year(
             self.lots, year,
             self.profile.get("other_realized_gains_current_year", 0) or 0.0)
@@ -1588,9 +1791,9 @@ class App(ctk.CTk):
                           "basis unknown" if r["gain"] is None
                           else money(r["gain"])])
         if srows:
-            Table(f, ["Sold %d — asset" % year, "Account", "Shares", "Cost $",
-                      "Sale $", "Sold", "Term", "Gain $"],
-                  srows).pack(fill="both", padx=6, pady=6)
+            Table(body, ["Sold %d — asset" % year, "Account", "Shares",
+                         "Cost $", "Sale $", "Sold", "Term", "Gain $"],
+                  srows).pack(fill="x", padx=6, pady=6)
         cap = self.profile.get("annual_net_gains_cap")
         cap = None if cap is None else float(cap)
         cap_note = (self.profile.get("cap_note") or "").strip()
@@ -1599,7 +1802,7 @@ class App(ctk.CTk):
         header = "%d annual net-gains budget" % year
         if cap_note:
             header += " — %s" % cap_note
-        Table(f, [header, "$"],
+        Table(body, [header, "$"],
               [["Annual net-gains cap%s" % (
                   "" if cap is not None else " (unset — set in Settings)"),
                 money(cap)],
@@ -1610,7 +1813,7 @@ class App(ctk.CTk):
                ["**Remaining budget (leeway)",
                 "**" + (money(cap - total) if cap is not None
                         else "—")]],
-              ).pack(fill="both", padx=6, pady=6)
+              ).pack(fill="x", padx=6, pady=6)
         note = ("Itemized sold rows and the pre-app field must NOT overlap "
                 "— no double-counting. ")
         if unknown:
@@ -1618,7 +1821,7 @@ class App(ctk.CTk):
                      "total. " % _n(unknown, "sold lot"))
         note += ("Do NOT invent basis. Wash-sale rule: do not rebuy the "
                  "same asset within 30 days of a loss sale.")
-        self._selectable_note(f, note, padx=6, pady=6, fill="x")
+        self._selectable_note(body, note, padx=6, pady=6, fill="x")
 
     # (Charts merged into build_diversification; Rebalance merged too.)
 
@@ -3151,15 +3354,15 @@ class App(ctk.CTk):
             padx=8, pady=8, fill="x")
         bar = ctk.CTkFrame(f, fg_color="transparent")
         bar.pack(fill="x", padx=8, pady=4)
-        ctk.CTkButton(bar, text="Download full template",
+        ctk.CTkButton(bar, text="Download Template",
                       command=self.download_full_template).pack(
                           side="left", padx=4)
-        ctk.CTkButton(bar, text="Download filled template",
+        ctk.CTkButton(bar, text="Download Data",
                       command=self.download_filled_template).pack(
                           side="left", padx=4)
-        ctk.CTkButton(bar, text="Upload filled template",
+        ctk.CTkButton(bar, text="Upload",
                       command=self.upload_template).pack(side="left", padx=4)
-        ctk.CTkButton(bar, text="Back up now",
+        ctk.CTkButton(bar, text="Backup",
                       command=self.backup_now).pack(side="left", padx=4)
         self.template_more_menu = ctk.CTkOptionMenu(
             bar, values=["Paste rows", "Import broker CSV", "Copy AI prompt"],
@@ -3167,9 +3370,9 @@ class App(ctk.CTk):
         self.template_more_menu.set("More ▾")
         self.template_more_menu.pack(side="left", padx=4)
         ctk.CTkLabel(
-            f, text="Download filled template: your current data, filled "
+            f, text="Download Data: your current data, filled "
                    "into the template — upload it into another copy of the "
-                   "app. Back up now: one-click backup into your remembered "
+                   "app. Backup: one-click backup into your remembered "
                    "backup folder (a synced Drive/OneDrive/Dropbox folder "
                    "carries it to other machines — no cloud built in).",
             text_color=CLR_SECONDARY, wraplength=860,
@@ -3204,15 +3407,33 @@ class App(ctk.CTk):
             lines.append("  Example: %s" % g["example"])
             lines.append("")
         lines.append(
-            "Faster than screenshots: both brokers export these lot tables "
-            "as CSV — Schwab: Lot Details → Export, and Realized Gain/Loss "
-            "→ Export Lot Details; Vanguard: Export at the top right of the "
-            "cost basis table. Hand the export to any AI to fill the "
-            "template, or use Import broker CSV. Other brokers (Wells, "
-            "Chase, Coinbase, Cash App, Health Equity): same concepts — "
-            "Holdings/Positions → Cost basis/Lots for open lots; "
-            "History/Realized gains for closed lots; the year-end 1099-B is "
-            "the authority for sold lots.")
+            "Which file to export for Import broker CSV "
+            "(read this before exporting):")
+        lines.append(
+            "  Schwab — open lots: Positions → Cost Basis $ / Lot Details "
+            "→ export. Sold lots: Realized Gain/Loss → Export Lot Details.")
+        lines.append(
+            "  Vanguard — Cost basis → Unrealized / Realized → Show lot "
+            "details → Export (top-right of the table).")
+        lines.append(
+            "  What Import accepts: ONLY a file shaped like the template "
+            "(this exact header row: "
+            "bank,account,account_type,asset,shares,cost_per_share,"
+            "acquired_date,sold_date,sale_price_per_share). A raw "
+            "Schwab/Vanguard export has different columns, so reshape it "
+            "to the template first — by hand, via the Copy AI prompt, or "
+            "via Paste rows — then Import (or Upload) it. Anything else "
+            "gets the plain not-recognized message pointing back at the "
+            "template; nothing is ever guessed, nothing changed.")
+        lines.append(
+            "  Caveats that are normal, not errors: Vanguard provides no "
+            "cost basis for IRA accounts, so blank IRA cost is expected. "
+            "The year-end 1099-B is the authority for sold lots.")
+        lines.append(
+            "  Other brokers (Wells, Chase, Coinbase, Cash App, Health "
+            "Equity): same concepts — Holdings/Positions → Cost basis/Lots "
+            "for open lots; History/Realized gains for closed lots.")
+        lines.append("")
         guide.insert("1.0", "\n".join(lines))
         # Read-only but mouse-selectable (Ctrl+C works): a disabled box
         # cannot be selected at all. Typing/paste/cut are blocked below;
@@ -3289,7 +3510,12 @@ class App(ctk.CTk):
         self.template_msg.configure(text=msg)
 
     def import_broker_csv(self):
-        path = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
+        # Hint at the moment of importing (the dialog title): the full
+        # per-broker export steps live in the Template guidance section.
+        path = filedialog.askopenfilename(
+            title="Import broker CSV — template-shaped file only "
+                  "(see Template guidance for broker export steps)",
+            filetypes=[("CSV", "*.csv")])
         if not path:
             return
         try:
@@ -3383,7 +3609,7 @@ class App(ctk.CTk):
     def download_filled_template(self):
         """Download the full dataset (open + closed lots, all accounts)
         as a plain CSV in the exact template format, so it can be fed to
-        another copy of the app via Upload filled template. Exports the
+        another copy of the app via Upload. Exports the
         last SAVED state: unsaved Inputs edits trigger a
         Save & Download / Download saved state / Cancel choice."""
         if not self._ensure_saved("download"):
@@ -3470,12 +3696,25 @@ class App(ctk.CTk):
         # Formerly the Profile sub-tab: same fields and same save
         # semantics, now a dialog under the ☰ menu, plus the user-set
         # net-gains cap (blank = no cap enforced) and its note.
+        # Fixed footer: Save/Cancel live outside the scrollable, so they
+        # stay on screen at any size; the fields scroll above. Dialog
+        # height never exceeds the viewport.
         win = ctk.CTkToplevel(self)
         win.title("Settings")
         win.transient(self)
         win.resizable(False, False)
-        body = ctk.CTkScrollableFrame(win, width=560, height=560)
-        body.pack(fill="both", expand=True, padx=10, pady=10)
+        try:
+            max_h = max(480, self.winfo_screenheight() - 160)
+        except tk.TclError:
+            max_h = 720
+        win.geometry("620x%d" % min(720, max_h))
+        body = ctk.CTkScrollableFrame(win, width=580, height=560)
+        body.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        foot = ctk.CTkFrame(win, fg_color="transparent")
+        foot.pack(fill="x", side="bottom", padx=10, pady=(4, 10))
+        msg = ctk.CTkLabel(foot, text="", text_color="orange",
+                           wraplength=560, anchor="w")
+        msg.pack(anchor="w", padx=4, pady=(0, 4))
         entries = {}
         fields = [("date_of_birth", "Date of birth (YYYY-MM or YYYY-MM-DD)"),
                   ("ss_owner_monthly", "Owner Social Security $/mo"),
@@ -3496,9 +3735,71 @@ class App(ctk.CTk):
             ent.insert(0, "" if val is None else str(val))
             ent.pack(anchor="w", padx=4, pady=2)
             entries[key] = ent
-        msg = ctk.CTkLabel(body, text="", text_color="orange",
-                           wraplength=480, anchor="w")
-        msg.pack(anchor="w", padx=4, pady=4)
+        # ---- Properties: addresses live here; the RentCast key too.
+        # Refresh (hamburger menu) pulls each estimate and SHOWS it —
+        # nothing is replaced until the user accepts it or types a value
+        # and presses Save settings. Redfin/Zillow enter through the
+        # manual applied value (check in the browser, type the number).
+        ctk.CTkLabel(body, text="Properties",
+                     font=ctk.CTkFont(weight="bold")).pack(
+                         anchor="w", padx=4, pady=(10, 0))
+        ctk.CTkLabel(body, text="RentCast API key (free Developer tier)").pack(
+            anchor="w", padx=4, pady=(6, 0))
+        key_ent = ctk.CTkEntry(body, width=380)
+        key_ent.insert(0, self.profile.get("rentcast_key") or "")
+        key_ent.pack(anchor="w", padx=4, pady=2)
+        prop_box = ctk.CTkFrame(body, fg_color="transparent")
+        prop_box.pack(fill="x", padx=4, pady=2)
+        prop_rows = []
+
+        def add_prop_row(prop=None):
+            prop = dict(prop or {})
+            frame = ctk.CTkFrame(prop_box)
+            frame.pack(fill="x", pady=3)
+            ctk.CTkLabel(frame, text="Address (Street, City, State, Zip)").pack(
+                anchor="w", padx=4)
+            addr = ctk.CTkEntry(frame, width=380)
+            addr.insert(0, prop.get("address") or "")
+            addr.pack(anchor="w", padx=4, pady=2)
+            line = ctk.CTkFrame(frame, fg_color="transparent")
+            line.pack(fill="x", padx=4, pady=2)
+            ctk.CTkLabel(line, text="Applied $").pack(side="left")
+            applied = ctk.CTkEntry(line, width=130)
+            try:
+                cur = float(prop.get("applied_value") or 0)
+                if cur:
+                    applied.insert(0, str(prop.get("applied_value")))
+            except (TypeError, ValueError):
+                pass
+            applied.pack(side="left", padx=4)
+            last = prop.get("last_estimate")
+            last_txt = ("Last: %s (%s, %s)" % (
+                money(last), prop.get("last_source") or "?",
+                prop.get("last_asof") or "?")) if last else "No estimate yet."
+            ctk.CTkLabel(line, text=last_txt,
+                         text_color=CLR_SECONDARY).pack(side="left", padx=4)
+
+            def remove():
+                frame.destroy()
+                prop_rows[:] = [r for r in prop_rows if r["frame"] != frame]
+
+            ctk.CTkButton(frame, text="Remove", width=90,
+                          command=remove).pack(anchor="w", padx=4, pady=2)
+            prop_rows.append({"frame": frame, "addr": addr,
+                             "applied": applied, "last": prop})
+
+        for _p in self._properties():
+            add_prop_row(_p)
+        ctk.CTkButton(body, text="Add property", width=130,
+                      command=lambda: add_prop_row()).pack(
+                          anchor="w", padx=4, pady=4)
+        self._selectable_note(
+            body, "Refresh home estimates (hamburger menu) pulls the "
+                  "RentCast estimate per property and shows it next to "
+                  "the applied value — accepting or typing a value and "
+                  "saving is what applies it. No key: Refresh shows a "
+                  "hint, nothing breaks.",
+            padx=4, pady=4, fill="x")
         note = self._selectable_note(body, self._settings_summary_text(),
                                      padx=4, pady=4, fill="x")
 
@@ -3533,15 +3834,37 @@ class App(ctk.CTk):
                     text="Settings not saved — amounts must be numbers "
                          "(cap may be blank for no cap, never negative).")
                 return
+            try:
+                new_props = []
+                for r in prop_rows:
+                    raw = r["applied"].get().strip().replace(",", ""
+                                                             ).replace("$",
+                                                                       "")
+                    applied = float(raw or 0)
+                    last = dict(r["last"])
+                    last["address"] = r["addr"].get().strip()
+                    last["applied_value"] = applied
+                    new_props.append(last)
+            except ValueError:
+                msg.configure(text="Settings not saved — applied home "
+                                   "values must be numbers.")
+                return
+            self.profile["properties"] = new_props
+            self.profile["rentcast_key"] = key_ent.get().strip()
             pc.save_profile(PROFILE_JSON, self.profile)
+            self._sync_home()
             self.recompute()
             self.build_all()
             self.refresh_data_window()
             self.status_var.set("Settings saved.")
             win.destroy()
 
-        ctk.CTkButton(body, text="Save settings",
-                      command=save).pack(anchor="w", padx=4, pady=8)
+        # Fixed footer: always visible and clickable without scrolling;
+        # Tab order reaches Save natively, Enter activates it.
+        ctk.CTkButton(foot, text="Save settings", width=150,
+                      command=save).pack(side="left", padx=4)
+        ctk.CTkButton(foot, text="Cancel", width=110,
+                      command=win.destroy).pack(side="left", padx=4)
         win.after(50, lambda: (win.deiconify(), win.lift())
                   if win.winfo_exists() else None)
 
@@ -3576,9 +3899,9 @@ class App(ctk.CTk):
         warn = ctk.CTkFrame(f, fg_color="transparent")
         warn.pack(fill="x", padx=8, pady=4)
         ctk.CTkLabel(
-            warn, text="Back up first — download your filled template:",
+            warn, text="Back up first — download your data:",
             text_color="red").pack(side="left", padx=4)
-        ctk.CTkButton(warn, text="Download filled template", width=200,
+        ctk.CTkButton(warn, text="Download Data", width=200,
                       command=self.download_filled_template).pack(
                           side="left", padx=4)
         self.danger_entry = None

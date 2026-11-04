@@ -1379,13 +1379,16 @@ def liquidity_by_bank(lots, prices):
 RETIREMENT_TYPES_UNLOCK65 = ("Traditional IRA", "Roth IRA")
 
 
-def holdings_by_asset(lots, prices, home_value, home_cost=None):
+def holdings_by_asset(lots, prices, home_value, home_cost=None,
+                      homes=None):
     """One row per asset aggregated across accounts (open lots only;
     CASH_USD excluded — cash lives in Liquidity). A position's average and
     gains show ONLY when ALL its open lots have cost (`complete`); partial
     averages misread as whole-position figures, so incomplete positions
-    report cost as missing instead. Home is one more row (cost = purchase
-    price if known, else value only, no gain) and is always complete.
+    report cost as missing instead. Home is one row PER PROPERTY (cost =
+    purchase price if known and a single property, else value only, no
+    gain) and is always complete; pass homes=[(label, value)] or omit for
+    the legacy single "Home (real estate)" row.
     Returns ([rows], total_value) sorted by value desc; each row carries
     per-account lot detail for expansion."""
     agg = {}
@@ -1418,15 +1421,20 @@ def holdings_by_asset(lots, prices, home_value, home_cost=None):
                      "avg_cost": avg, "price": price, "value": value,
                      "gain": gain, "gain_pct": gain_pct,
                      "by_acct": a["by_acct"]})
-    rows.append({"asset": "Home (real estate)", "shares": 1.0, "missing": 0.0,
-                 "complete": True,
-                 "avg_cost": home_cost, "price": home_value,
-                 "value": home_value,
-                 "gain": None if home_cost is None
-                 else home_value - home_cost,
-                 "gain_pct": None if not home_cost
-                 else (home_value - home_cost) / home_cost,
-                 "by_acct": {}})
+    home_rows = ([("Home (real estate)", home_value)]
+                 if homes is None else list(homes))
+    for label, value in home_rows:
+        # Purchase-price gain math only in the single-property case (one
+        # cost basis, one value); multi-property rows are value-only.
+        cost = home_cost if len(home_rows) == 1 else None
+        rows.append({"asset": label, "shares": 1.0, "missing": 0.0,
+                     "complete": True,
+                     "avg_cost": cost, "price": value,
+                     "value": value,
+                     "gain": None if cost is None else value - cost,
+                     "gain_pct": None if not cost
+                     else (value - cost) / cost,
+                     "by_acct": {}})
     rows.sort(key=lambda r: (r["value"] is None, -(r["value"] or 0)))
     total = sum(r["value"] for r in rows if r["value"] is not None)
     return rows, total
@@ -1478,6 +1486,89 @@ def fifo_sell(lots, account, asset, qty, sold_date, sale_price, cost=None):
     return new_lots, None
 
 
+# ================= home value (RentCast) =================
+# Auto source for home estimates: RentCast API, free Developer tier
+# (50 calls/month, no credit card). Endpoint /v1/avm/value takes a full
+# address ("Street, City, State, Zip") and returns {"price": ...} plus
+# comparables. Auth is the X-Api-Key header. Redfin has NO public API —
+# no scraper is built; Redfin enters through the manual applied-value
+# override (the user checks redfin.com and types the number). Same
+# standing rule as Zillow: never scrape.
+RENTCAST_AVM_URL = "https://api.rentcast.io/v1/avm/value"
+RENTCAST_TIMEOUT = 20
+
+
+def fetch_rentcast_estimate(address, api_key, timeout=RENTCAST_TIMEOUT,
+                            base_url=None):
+    """Fetch one RentCast value estimate. Returns a dict with price (or
+    None), source ("RentCast"), asof (fetch date), quota (remaining-calls
+    text when the API reports it, else ""), and error ("" on success).
+    Quota guard lives at the call site: call ONLY on explicit Refresh —
+    never in the background, never on app start. Never raises: every
+    failure (no key, no network, bad key, quota out, unknown address)
+    comes back as a plain error string for the UI to show."""
+    import datetime
+    import json
+    import urllib.parse
+    import urllib.request
+    out = {"price": None, "source": "RentCast",
+           "asof": datetime.date.today().isoformat(), "quota": "",
+           "error": ""}
+    if not (api_key or "").strip():
+        out["error"] = ("No RentCast key — add your free Developer key in "
+                        "Settings, then Refresh.")
+        return out
+    if not (address or "").strip():
+        out["error"] = "Add a property address in Settings first."
+        return out
+    url = "%s?address=%s" % ((base_url or RENTCAST_AVM_URL),
+                             urllib.parse.quote(address.strip()))
+    req = urllib.request.Request(
+        url, headers={"X-Api-Key": api_key.strip(),
+                      "Accept": "application/json"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        try:
+            payload = json.load(resp)
+        finally:
+            resp.close()
+    except Exception as e:  # noqa: BLE001 - every failure is UI text
+        code = getattr(e, "code", None)
+        if code == 401:
+            out["error"] = ("RentCast rejected the key (401) — check it in "
+                            "Settings.")
+        elif code == 429:
+            out["error"] = ("RentCast quota exhausted (429) — free tier is "
+                            "50 calls/month.")
+        elif code is not None:
+            out["error"] = "RentCast error %s." % code
+        else:
+            out["error"] = ("Could not reach RentCast (%s) — kept the last "
+                            "value." % type(e).__name__)
+        return out
+    try:
+        headers = getattr(resp, "headers", None)
+        if headers is not None:
+            for key in ("X-RateLimit-Remaining", "X-Rate-Limit-Remaining",
+                        "RateLimit-Remaining", "X-Quota-Remaining",
+                        "X-Requests-Remaining"):
+                if headers.get(key):
+                    out["quota"] = ("RentCast quota left: %s calls"
+                                    % headers.get(key))
+                    break
+    except Exception:  # noqa: BLE001 - quota text is best-effort only
+        pass
+    price = payload.get("price") if isinstance(payload, dict) else None
+    try:
+        out["price"] = None if price is None else round(float(price))
+    except (TypeError, ValueError):
+        out["price"] = None
+    if out["price"] is None:
+        out["error"] = ("RentCast returned no price for that address — "
+                        "check the address in Settings.")
+    return out
+
+
 # ================= profile (profile.json) =================
 PROFILE_DEFAULTS = {
     # Neutral blanks — a fresh copy of the app knows nothing about its
@@ -1507,6 +1598,13 @@ PROFILE_DEFAULTS = {
     # persists here (gitignored), cleared by delete-all along with the rest
     # of the profile. Standard classes live in WATCHLIST_CLASSES in code.
     "watchlist_classes": {},
+    # RentCast API key (free Developer tier; user pastes it in Settings).
+    # Stored here (gitignored, never in the repo), wiped by delete-all.
+    "rentcast_key": "",
+    # Properties: [{address, applied_value, last_estimate, last_source,
+    # last_asof}]. The applied value is what flows into Holdings, net
+    # worth and drift; the last estimate is display-only until accepted.
+    "properties": [],
 }
 
 

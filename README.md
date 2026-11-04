@@ -48,8 +48,8 @@ Refresh home estimates, Log, Settings.
   chart, no alerts: only "No data yet — add your first bank / account, or
   upload a filled template" with those two actions as buttons. A fresh copy
   ships blank defaults (no personal values in the code) — fill in
-  Settings (☰ menu) and set the home estimate via ☰ → Refresh home
-  estimates.
+  Settings (☰ menu, including Properties for the home address) and pull
+  the home estimate via ☰ → Refresh home estimates.
 - **Diversification** — the 15:15:35:15:20 standard + rationale, current
   position vs standard, the Target-vs-actual allocation bar chart (this tab
   only), rebalance plan (display only — NEVER executes trades), and the
@@ -105,9 +105,14 @@ future upcoming-events calendar for portfolio holdings.)
   are never cropped by a short window (that clipping once ate x-labels,
   legends, and whole bar groups). Long labels wrap at 860px; crowded
   button rows consolidate secondary actions into a More ▾ menu instead of
-  scrolling or stacking. Both charts use the constrained layout engine
-  (solved on every draw at the figure's real size) — never a manual
-  tight_layout pass, which warned on every cold start instead of fitting.
+  scrolling or stacking. One scroll region per view: tables render at
+  full height inside the view's single scrollable — no nested scrollbars
+  (they fought over mouse-wheel events). Both charts use the constrained
+  layout engine (solved on every draw at the figure's real size) — never a
+  manual tight_layout pass, and the first layout waits for a real canvas
+  size instead of a transient near-zero startup width (each warned on cold
+  start before this — first the tight-layout warning, then the
+  constrained-collapse warning).
 - Money/percent style (shared formatters, every view inherits): exactly
   zero renders as a bare `-` (known-and-zero — `$0` / `0.0%` never appear);
   negatives render red and in parentheses with the $ inside — `($5,000)`,
@@ -196,44 +201,57 @@ only navigation (the ☰ menu opens no window).
   app-wide, over entries and buttons too — as fast as scrollbar drag. Grid
   columns budget to 798px so the full grid fits a 960px split-screen window
   with no horizontal overflow; long gain strings wrap instead of clipping.
-- **Template** — **Download full template** (header only),
-  **Download filled template** (your current data, filled into the
-  template — a plain CSV for uploading into another copy of the app;
-  defaults to your Downloads folder as
-  `filled-template-YYYYMMDD-HHMM.csv`, never the repo folder; exports the
-  last saved state, so unsaved Inputs edits ask Save & Download /
-  Download saved state / Cancel), **Upload filled template** (reports
-  "N rows: X updated, Y inserted"), **Back up now** (one-click backup into
-  your remembered backup folder — timestamped `filled-template-*.csv`
-  files accumulate; a synced Drive/OneDrive/Dropbox folder carries them to
-  other machines, no cloud integration — plus a last-backup stamp and a
+- **Template** — row reads **Download Template | Download Data |
+  Upload | Backup | More ▾**. **Download Template** (header only),
+  **Download Data** (your current data, filled into the template — a plain
+  CSV for uploading into another copy of the app; defaults to your
+  Downloads folder as `filled-template-YYYYMMDD-HHMM.csv`, never the repo
+  folder; exports the last saved state, so unsaved Inputs edits ask Save &
+  Download / Download saved state / Cancel), **Upload** (reports "N rows:
+  X updated, Y inserted"), **Backup** (one-click backup into your
+  remembered backup folder — timestamped `filled-template-*.csv` files
+  accumulate; a synced Drive/OneDrive/Dropbox folder carries them to other
+  machines, no cloud integration — plus a last-backup stamp and a
   Change-backup-folder button), and a **More ▾** menu holding the secondary
-  actions **Paste rows** (clipboard TSV/CSV), **Import broker CSV**
-  (template-shaped exports import; anything else is plainly rejected,
-  never guessed), and **Copy AI prompt** (ready-made screenshot-to-CSV
-  prompt for any AI). Download = save-dialog each time, anywhere; backup =
-  remembered folder + one click + stamp. The tab also carries a per-field
-  broker guide (Schwab + Vanguard paths, CSV-export pointers, 1099-B note)
-  as one fast-scrolling text block.
+  actions **Paste rows** (clipboard TSV/CSV), **Import broker CSV** (ONLY
+  template-shaped files import — a raw Schwab/Vanguard export has different
+  columns, so reshape it to the template first; anything else is plainly
+  rejected, never guessed; the Import dialog title points at the guidance),
+  and **Copy AI prompt** (ready-made screenshot-to-CSV prompt for any AI).
+  Download = save-dialog each time, anywhere; backup = remembered folder +
+  one click + stamp. The tab also carries a per-field broker guide (Schwab +
+  Vanguard paths, CSV-export pointers, 1099-B note) plus a "Which file to
+  export for Import broker CSV" block with the exact Schwab (Positions →
+  Cost Basis $ / Lot Details → export) and Vanguard (Cost basis →
+  Unrealized/Realized → Show lot details → Export, top-right) steps, the
+  template-shape rule the importer actually enforces, and the standing
+  caveats (Vanguard IRA blank cost is expected; 1099-B is the authority).
 - **True-up test** — verify a fresh copy of the app reproduces your data:
-  Save, then Template → Download filled template (note open/closed counts,
+  Save, then Template → Download Data (note open/closed counts,
   per-account values, liquid total, net worth). Fresh clone (no data files
   carried over) → install → run → confirm the empty state → upload the
-  file via Upload filled template. Press Refresh stocks in BOTH apps
-  back-to-back, set the same home estimate in the clone (☰ → Refresh home
-  estimates), then compare: lots/shares/cost/counts must match exactly,
+  file via Upload. Press Refresh stocks in BOTH apps back-to-back, apply
+  the same home value in the clone (Settings → Properties, or ☰ → Refresh
+  home estimates), then compare: lots/shares/cost/counts must match exactly,
   liquid total and net worth must match. The template carries positions,
   not prices (the clone fetches its own) and not home value (set it
   identically in the clone).
 - **Settings** (☰ menu dialog, formerly the Profile sub-tab) — date of
   birth, SS amounts, other gains + note, optional home purchase price,
-  annual net-gains cap $/yr (blank = no cap enforced) + cap reason/note
+  annual net-gains cap $/yr (blank = no cap enforced) + cap reason/note,
+  RentCast API key (free Developer tier, pasted in by the user) and the
+  Properties list (address + applied value + last estimate/source/date per
+  property, Add/Remove; Redfin and Zillow enter through the manual applied
+  value — check in the browser, type the number; no scrapers)
   (all blank by default — the user fills them in). Shows live spending
-  capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.
+  capacity: before-65 $/yr, after-65 base + SS = all-in $/yr. Save/Cancel
+  live in a fixed footer that never scrolls away; the dialog never exceeds
+  the viewport height.
 - **Danger Zone** — red-styled data-management tab. Delete all data (with
-  a backup-first warning, an inline Download filled template button, and a
-  type-DELETE confirmation) wipes portfolio.csv, profile.json,
-  drift_log.csv, prices_cache.json, and accounts.json, returning the app to
+  a backup-first warning, an inline Download Data button, and a
+  type-DELETE confirmation) wipes portfolio.csv, profile.json (settings,
+  cap, watchlist classes, RentCast key, properties), drift_log.csv,
+  prices_cache.json, and accounts.json, returning the app to
   the fresh-install empty state; re-uploading restores the numbers. Needed
   because uploads upsert, never replace — delete-then-upload is the only
   clean dataset replacement.
@@ -278,9 +296,15 @@ the brokerage.
 - **Record buys/sells**: use the Accounts tab buttons (Add / Sold / Mark
   closed), edit the Inputs grid, or fill a template and upload it. Then
   ☰ → Refresh stocks.
-- **Home value**: ☰ → Refresh home estimates (blank until you set it; no
-  Zillow scraper — automatic fetching only if a reliable estimate API
-  appears).
+- **Home value**: Settings → Properties (address + applied value per
+  property; the applied value flows into Holdings, net worth and drift;
+  Holdings shows one row per property). ☰ → Refresh home estimates pulls
+  the RentCast estimate per property (free Developer key in Settings) and
+  SHOWS value + source + date — accepting or typing a value and saving is
+  what applies it; nothing is silently replaced. No key: Refresh shows a
+  plain hint. Redfin/Zillow enter via the manual applied value (no
+  scrapers). RentCast is called ONLY on explicit Refresh — 50 calls/month
+  free tier; remaining quota shows when the API reports it.
 - **Log** (☰ menu): appends today's close to `drift_log.csv`
   (skips weekends, like the old daily cron). Upserts if run twice.
 - **Cost basis**: fill cost + acquired date per lot (Inputs grid or
@@ -295,7 +319,8 @@ the brokerage.
   BASELINE_HOME and JAN1_PRICES in `portfolio_calc.py` from the new
   December snapshot.
 - **Data files** (all gitignored, never committed): `portfolio.csv`
-  (lots), `profile.json` (settings + cap + user watchlist classes),
+  (lots), `profile.json` (settings + cap + user watchlist classes +
+  RentCast key + properties),
   `accounts.json` (account registry — accounts exist independent of lots),
   `drift_log.csv`, `prices_cache.json` (prices + cached watchlist quotes),
   backups, downloaded CSVs. Delete-all wipes all five store files
