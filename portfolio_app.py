@@ -173,9 +173,14 @@ class Table(ctk.CTkScrollableFrame):
             for j, val in enumerate(row):
                 bold = str(val).startswith("**")
                 text = str(val).replace("**", "")
+                # House style: negative figures render red + parenthesized
+                # (the parens come from the shared fmt_usd/fmt_pct/fmt_pp;
+                # the red is applied here so every table inherits it).
+                neg = pc.is_negative_figure(str(val))
                 lbl = ctk.CTkLabel(
                     self, text=text,
                     font=ctk.CTkFont(weight="bold") if bold else None,
+                    text_color="red" if neg else None,
                     anchor="w")
                 lbl.grid(row=i, column=j, padx=4, pady=3, sticky="w")
 
@@ -206,6 +211,7 @@ class App(ctk.CTk):
         self.geometry("1240x860")
         self.lots = pc.load_portfolio(PORTFOLIO_CSV)
         self.profile = pc.load_profile(PROFILE_JSON)
+        self._migrate_watchlist()
         self.accounts = pc.load_accounts(ACCOUNTS_JSON)
         self.positions = pc.positions_from_lots(self.lots)
         self.cost_basis = pc.cost_map_from_lots(self.lots)
@@ -351,13 +357,44 @@ class App(ctk.CTk):
             except (tk.TclError, AttributeError):
                 pass
 
+    def _migrate_watchlist(self):
+        # One-time fold of the legacy flat watchlist_custom into a named
+        # user class, so existing custom tickers survive the grouping.
+        legacy = [str(t).strip().upper()
+                  for t in (self.profile.get("watchlist_custom") or [])]
+        legacy = [t for t in legacy if t]
+        if not legacy:
+            return
+        classes = dict(self.profile.get("watchlist_classes") or {})
+        mine = list(classes.get("My watchlist", []))
+        for t in legacy:
+            if t not in mine:
+                mine.append(t)
+        classes["My watchlist"] = mine
+        self.profile["watchlist_classes"] = classes
+        self.profile["watchlist_custom"] = []
+        pc.save_profile(PROFILE_JSON, self.profile)
+
+    def watch_classes(self):
+        """Ordered [(class name, [tickers])]: the fixed standard classes
+        from code, then user-defined classes from profile.json."""
+        out = [(c, list(pc.WATCHLIST_CLASSES[c]))
+               for c in pc.WATCHLIST_CLASS_ORDER]
+        for name, tickers in (
+                self.profile.get("watchlist_classes") or {}).items():
+            clean = [str(t).strip().upper() for t in (tickers or [])
+                     if str(t).strip()]
+            out.append((str(name), clean))
+        return out
+
     def watch_tickers(self):
-        """Standard 10 + user customs (deduped, uppercase)."""
-        out = list(pc.WATCHLIST_STANDARD)
-        for t in (self.profile.get("watchlist_custom") or []):
-            s = str(t).strip().upper()
-            if s and s not in out:
-                out.append(s)
+        """Flat fetch/duplicate-check set: standard members + every user
+        class member (deduped, uppercase)."""
+        out = []
+        for _name, tickers in self.watch_classes():
+            for t in tickers:
+                if t not in out:
+                    out.append(t)
         return out
 
     def refresh_async(self):
@@ -777,7 +814,25 @@ class App(ctk.CTk):
                 fig.set_size_inches(w / fig.get_dpi(),
                                     fig.get_size_inches()[1],
                                     forward=True)
-                fig.tight_layout()
+                # Manual tight_layout only for figures without a layout
+                # engine — the chart builders use the constrained engine
+                # (solved on draw), where a manual pass only warns.
+                # get_layout_engine is the current API; the constrained
+                # getters are deprecated.
+                use_tight = True
+                get_engine = getattr(fig, "get_layout_engine", None)
+                if get_engine is not None:
+                    try:
+                        use_tight = get_engine() is None
+                    except Exception:  # noqa: BLE001 - fall back to tight
+                        use_tight = True
+                elif hasattr(fig, "get_constrained_layout"):
+                    try:
+                        use_tight = not fig.get_constrained_layout()
+                    except Exception:  # noqa: BLE001
+                        use_tight = True
+                if use_tight:
+                    fig.tight_layout()
                 # The Tk canvas keeps its creation-time requested size
                 # (1000px): without this the scrollable interior stays
                 # 1000+ wide and the audit (rightly) reports overflow.
@@ -891,9 +946,25 @@ class App(ctk.CTk):
     def _watch_row(self, t):
         q = (self.watch or {}).get(t, {})
         price = q.get("price")
-        mcap = q.get("mcap")
+        if t == "BTC" and price is not None:
+            # BTC-USD quotes carry no market cap: COMPUTE mined supply x
+            # price, so the row never shows "--" when priced.
+            mcap = pc.btc_class_mcap(price)
+        else:
+            mcap = q.get("mcap")
         return [t, money(price),
                 "--" if mcap is None else "$%.2fT" % (mcap / 1e12)]
+
+    def _watch_class_title(self, name, tickers):
+        # Header shows the class name + its total approx market cap. The
+        # Gold total is the COMPUTED above-ground stock value — a different
+        # number from GLD's net assets in its row; shown in different places
+        # and labeled distinctly, never conflated.
+        total = pc.watch_class_total(name, self.watch or {}, tickers)
+        total_txt = "--" if total is None else "$%.2fT" % (total / 1e12)
+        if name == "Gold":
+            return "Gold (above-ground stock) · %s total" % total_txt
+        return "%s · %s total" % (name, total_txt)
 
     def build_watchlist(self, body):
         # Market data, not portfolio data: always shown — even with zero
@@ -901,47 +972,81 @@ class App(ctk.CTk):
         # and alerts, never this). Prices update ONLY on Refresh stocks,
         # the same fetch cycle as portfolio prices; cached quotes show
         # before the first refresh. No polling, no separate refresh.
+        # Standard classes are fixed content in code; user-defined classes
+        # persist in profile.json and clear on delete-all. Watchlist first,
+        # the reserved events calendar goes below it when built.
         ctk.CTkLabel(body, text="Watchlist",
                      font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
                          padx=10, pady=(10, 2), anchor="w")
-        Table(body, ["Ticker", "Price", "Market cap ($T)"],
-              [self._watch_row(t) for t in pc.WATCHLIST_STANDARD]
-              ).pack(fill="x", padx=10, pady=4)
-        customs = [t for t in self.watch_tickers()
-                   if t not in pc.WATCHLIST_STANDARD]
+        for name, tickers in self.watch_classes():
+            standard = name in pc.WATCHLIST_CLASSES
+            ctk.CTkLabel(
+                body, text=self._watch_class_title(name, tickers),
+                font=ctk.CTkFont(size=FS_BODY, weight="bold")).pack(
+                    padx=10, pady=(6, 0), anchor="w")
+            Table(body, ["Ticker", "Price", "Market cap ($T)"],
+                  [self._watch_row(t) for t in tickers]
+                  ).pack(fill="x", padx=10, pady=4)
+            if not standard:
+                self._watch_class_controls(body, name, tickers)
+        # New user-defined class: an asset class is a named watchlist.
+        row = ctk.CTkFrame(body, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=(6, 2))
+        ctk.CTkLabel(row, text="New asset class:").pack(side="left",
+                                                       padx=4)
+        cls_var = tk.StringVar()
+        ctk.CTkEntry(row, width=140, textvariable=cls_var).pack(
+            side="left", padx=4)
+        cmsg = ctk.CTkLabel(row, text="", text_color="orange")
+        cmsg.pack(side="left", padx=4)
+        ctk.CTkButton(row, text="Add class", width=100,
+                      command=lambda: self._watch_new_class(
+                          cls_var.get(), cmsg)).pack(side="left", padx=4)
+
+    def _watch_class_controls(self, body, name, tickers):
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(row, text="My watchlist:").pack(side="left", padx=4)
+        ctk.CTkLabel(row, text="Add ticker:").pack(side="left", padx=4)
         add_var = tk.StringVar()
-        ctk.CTkEntry(row, width=120, textvariable=add_var).pack(
+        ctk.CTkEntry(row, width=100, textvariable=add_var).pack(
             side="left", padx=4)
         wmsg = ctk.CTkLabel(row, text="", text_color="orange")
         wmsg.pack(side="left", padx=4)
-        ctk.CTkButton(row, text="Add", width=80,
+        ctk.CTkButton(row, text="Add", width=70,
                       command=lambda: self._watch_add(
-                          add_var.get(), wmsg)).pack(side="left", padx=4)
-        if customs:
-            Table(body, ["Ticker", "Price", "Market cap ($T)"],
-                  [self._watch_row(t) for t in customs]
-                  ).pack(fill="x", padx=10, pady=4)
+                          name, add_var.get(), wmsg)).pack(side="left",
+                                                           padx=4)
+        if tickers:
             rrow = ctk.CTkFrame(body, fg_color="transparent")
             rrow.pack(fill="x", padx=10, pady=2)
-            rem_var = tk.StringVar(value=customs[0])
-            ctk.CTkOptionMenu(rrow, values=customs, variable=rem_var,
-                              width=120).pack(side="left", padx=4)
-            ctk.CTkButton(rrow, text="Remove", width=100,
+            rem_var = tk.StringVar(value=tickers[0])
+            ctk.CTkOptionMenu(rrow, values=tickers, variable=rem_var,
+                              width=110).pack(side="left", padx=4)
+            ctk.CTkButton(rrow, text="Remove", width=90,
                           command=lambda: self._watch_remove(
-                              rem_var.get(), wmsg)).pack(side="left",
-                                                         padx=4)
+                              name, rem_var.get(),
+                              wmsg)).pack(side="left", padx=4)
+            ctk.CTkButton(rrow, text="Delete class", width=110,
+                          command=lambda: self._watch_delete_class(
+                              name)).pack(side="left", padx=4)
 
-    def _watch_add(self, sym_raw, msg):
+    def _watch_user_classes(self):
+        return dict(self.profile.get("watchlist_classes") or {})
+
+    def _watch_save_classes(self, classes):
+        self.profile["watchlist_classes"] = classes
+        pc.save_profile(PROFILE_JSON, self.profile)
+
+    def _watch_add(self, classname, sym_raw, msg):
         sym = (sym_raw or "").strip().upper()
-        customs = [t for t in self.watch_tickers()
-                   if t not in pc.WATCHLIST_STANDARD]
+        classes = self._watch_user_classes()
+        if classname not in classes:
+            msg.configure(text="%s is not a watchlist class." % classname)
+            return
         if not sym:
             msg.configure(text="Enter a ticker symbol.")
             return
-        if sym in pc.WATCHLIST_STANDARD or sym in customs:
+        if sym in self.watch_tickers():
             msg.configure(text="%s is already in watchlist." % sym)
             return
         msg.configure(text="Fetching %s…" % sym)
@@ -953,24 +1058,47 @@ class App(ctk.CTk):
             msg.configure(text="Could not find ticker %s — check the "
                                "symbol." % sym)
             return
-        customs.append(sym)
-        self.profile["watchlist_custom"] = customs
-        pc.save_profile(PROFILE_JSON, self.profile)
+        classes[classname] = classes[classname] + [sym]
+        self._watch_save_classes(classes)
         self.watch = pc.load_watchlist_cache(CACHE)
         self.build_overview()
-        self.status_var.set("Added %s to watchlist." % sym)
+        self.status_var.set("Added %s to %s." % (sym, classname))
 
-    def _watch_remove(self, sym, msg):
-        customs = [t for t in self.watch_tickers()
-                   if t not in pc.WATCHLIST_STANDARD]
-        if sym in customs:
-            customs.remove(sym)
-            self.profile["watchlist_custom"] = customs
-            pc.save_profile(PROFILE_JSON, self.profile)
+    def _watch_remove(self, classname, sym, msg):
+        classes = self._watch_user_classes()
+        members = classes.get(classname, [])
+        if sym in members:
+            classes[classname] = [t for t in members if t != sym]
+            self._watch_save_classes(classes)
             self.build_overview()
-            self.status_var.set("Removed %s from watchlist." % sym)
+            self.status_var.set("Removed %s from %s." % (sym, classname))
         else:
             msg.configure(text="%s is not in your watchlist." % sym)
+
+    def _watch_new_class(self, name_raw, msg):
+        name = (name_raw or "").strip()
+        classes = self._watch_user_classes()
+        if not name:
+            msg.configure(text="Name the new asset class.")
+            return
+        taken = [c.lower() for c in list(pc.WATCHLIST_CLASSES)
+                 + list(classes)]
+        if name.lower() in taken:
+            msg.configure(text="%s already exists." % name)
+            return
+        classes[name] = []
+        self._watch_save_classes(classes)
+        self.build_overview()
+        self.status_var.set("Added watchlist class %s." % name)
+
+    def _watch_delete_class(self, name):
+        classes = self._watch_user_classes()
+        if name in pc.WATCHLIST_CLASSES or name not in classes:
+            return
+        del classes[name]
+        self._watch_save_classes(classes)
+        self.build_overview()
+        self.status_var.set("Deleted watchlist class %s." % name)
 
     def _hold_avg_text(self, avg, missing):
         # Checklist rule: the average shows ONLY when every open lot has
@@ -1170,10 +1298,13 @@ class App(ctk.CTk):
         bar.pack(fill="x", padx=6, pady=6)
         ctk.CTkButton(bar, text="Add position",
                       command=self.add_position_form).pack(side="left", padx=4)
-        ctk.CTkButton(bar, text="Sell / Reduce",
+        # Record-keeping language, never trading language: this app is not
+        # connected to any brokerage and places no orders — every action
+        # here records something that already happened at the brokerage.
+        ctk.CTkButton(bar, text="Sold / Reduce",
                       command=lambda: self.sell_form(close_all=False)).pack(
                           side="left", padx=4)
-        ctk.CTkButton(bar, text="Close position",
+        ctk.CTkButton(bar, text="Mark closed",
                       command=lambda: self.sell_form(close_all=True)).pack(
                           side="left", padx=4)
         ctk.CTkButton(bar, text="Reopen",
@@ -1354,20 +1485,20 @@ class App(ctk.CTk):
             rows.append([r["bucket"], pct(r["target_pct"]),
                          money(r["target_dollar"]), money(r["actual"]),
                          pct(r["actual_pct"]),
-                         "%+.1fpp" % r["deviation_pp"],
+                         pc.fmt_pp(r["deviation_pp"]),
                          money(r["rebalance"])])
         Table(body, ["Bucket", "Target %", "Target $", "Actual $",
                      "Actual %", "Deviation (pp)",
-                     "Rebalance buy(+) / sell(-)"],
+                     "Rebalance (buy / sell)"],
               rows).pack(fill="both", padx=6, pady=6)
         fig1 = Figure(figsize=(10, 4.2), dpi=100)
         pc.make_allocation_chart(fig1, self.data["view3"])
         self._chart_canvas(body, fig1)
         self._selectable_note(
             body, "REBALANCE PLAN (display only, NEVER executes "
-                  "trades). All 4 trades inside Schwab Ashu IRA: $0 tax, "
-                  "Medi-Cal safe. Verify on the trade ticket before "
-                  "executing.",
+                  "trades). All 4 trades inside Schwab Ashu IRA: no tax "
+                  "(IRA), Medi-Cal safe. Verify at your brokerage before "
+                  "placing any trade.",
             padx=6, pady=6, fill="x")
         rows = []
         for t in self.data["view4"]["trades"]:
@@ -1375,7 +1506,7 @@ class App(ctk.CTk):
                          "--" if t["sell_sh"] is None else f"{t['sell_sh']:,}",
                          money(t["proceeds"]), t["buy"],
                          "--" if t["buy_sh"] is None else f"{t['buy_sh']:,}",
-                         "$0 (IRA)"])
+                         "- (IRA)"])
         Table(body, ["#", "Account", "Sell", "Sell shares",
                      "Est. proceeds $", "Buy", "Est. buy shares", "Tax cost"],
               rows).pack(fill="both", padx=6, pady=6)
@@ -1389,7 +1520,8 @@ class App(ctk.CTk):
                          pct(before / tnw) if tnw else "--",
                          money(after),
                          pct(after / tnw) if tnw else "--"])
-        rows.append(["**TOTAL", "**" + money(tnw), "**100.0%",
+        rows.append(["**TOTAL", "**" + money(tnw),
+                     "**" + (pct(1.0) if tnw else "--"),
                      "**" + money(v4["after_total"]),
                      "**" + pct(v4["after_total"] / tnw) if tnw else "--"])
         Table(body, ["Bucket", "Before $", "Before %", "After $",
@@ -1535,27 +1667,36 @@ class App(ctk.CTk):
         top = ctk.CTkFrame(f, fg_color="transparent")
         top.pack(fill="x", padx=8, pady=(8, 2))
         n = self._cov_counts()
+        # Adjacent pair at the right end, safe action first: [Save]
+        # [Discard changes]. Side="right" packing puts the LAST packed
+        # widget leftmost, so Discard packs before Save to read Save-then-
+        # Discard left to right. No header-row "Show all": the guided
+        # panel's own "Show all" (next to "Next account") is the single
+        # path to the full grid — one-path rule, and the freed room fits
+        # this pair at 960px.
         self.cov_save_btn = ctk.CTkButton(
             top, text=self._cov_save_label(n), width=230,
             command=self._cov_save,
             state="normal" if n else "disabled")
-        self.cov_save_btn.pack(side="right", padx=4)
         self._tooltip(self.cov_save_btn,
                       "Staged edits not yet committed — press Save to "
                       "validate and commit them all at once.")
-        ctk.CTkButton(top, text="Revert", width=90,
-                      command=self._cov_revert).pack(side="right", padx=4)
+        self.cov_discard_btn = ctk.CTkButton(
+            top, text="Discard changes", width=150,
+            command=self._cov_discard,
+            state="normal" if n else "disabled")
+        self._tooltip(self.cov_discard_btn,
+                      "Discard unsaved changes (saved data is not "
+                      "affected).")
+        self.cov_discard_btn.pack(side="right", padx=4)
+        self.cov_save_btn.pack(side="right", padx=4)
         ctk.CTkButton(top, text="Copy grid", width=120,
                       command=self._copy_cov_grid).pack(side="right",
                                                        padx=4)
         ctk.CTkButton(top, text="+ Add account", width=160,
                       command=self._cov_add_account).pack(side="right",
                                                          padx=4)
-        if self.cov_filter:
-            ctk.CTkButton(top, text="Show all", width=100,
-                          command=self._cov_show_all).pack(side="right",
-                                                          padx=4)
-        else:
+        if not self.cov_filter:
             ctk.CTkButton(top, text="Guided", width=100,
                           command=self._cov_guide_start).pack(side="right",
                                                              padx=4)
@@ -1581,8 +1722,9 @@ class App(ctk.CTk):
                    "• Rows are locked. Click Edit to change a row, or ↗ to "
                    "move it to another account.\n"
                    "• Typing never recalculates anything. Save (top right) "
-                   "checks everything and commits at once; Revert throws "
-                   "away unsaved edits.\n"
+                   "checks everything and commits at once; Discard "
+                   "changes throws away unsaved edits (saved data is "
+                   "not affected).\n"
                    "• Click any text and press Ctrl+C to copy it; every "
                    "table has a Copy table button.",
                 padx=8, pady=2, fill="x")
@@ -2289,6 +2431,14 @@ class App(ctk.CTk):
                     state="normal" if n else "disabled")
             except (tk.TclError, ValueError):
                 pass
+        # The discard button shares Save's enabled condition: with zero
+        # staged changes there is nothing to discard, so it stays greyed.
+        if getattr(self, "cov_discard_btn", None) is not None:
+            try:
+                self.cov_discard_btn.configure(
+                    state="normal" if n else "disabled")
+            except (tk.TclError, ValueError):
+                pass
         if getattr(self, "cov_progress", None) is not None:
             try:
                 t = self._cov_totals()
@@ -2432,6 +2582,47 @@ class App(ctk.CTk):
         self._cov_reset()
         self._cov_keep_scroll(self.build_data_coverage)
         self.status_var.set("Unsaved coverage edits discarded.")
+
+    def _confirm(self, title, text, ok_text="Discard"):
+        """Small modal with named confirm/cancel buttons. Returns True only
+        on the confirm button; closing the window counts as cancel."""
+        win = ctk.CTkToplevel(self)
+        win.title(title)
+        win.transient(self)
+        win.resizable(False, False)
+        win.grab_set()
+        ctk.CTkLabel(win, text=text, wraplength=360, anchor="w").pack(
+            padx=16, pady=(14, 10), anchor="w")
+        result = {"ok": False}
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(0, 14))
+
+        def _ok():
+            result["ok"] = True
+            win.destroy()
+
+        ctk.CTkButton(bar, text=ok_text, width=120,
+                      command=_ok).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(bar, text="Cancel", width=120,
+                      command=win.destroy).pack(side="left")
+        self.wait_window(win)
+        return result["ok"]
+
+    def _cov_discard(self):
+        # "Revert" never said WHAT it reverts, so it read as if saved work
+        # were at risk. It discards only this session's unsaved staged
+        # edits and reloads from the saved file — previous sessions'
+        # saved rows survive, because the reload comes from that file.
+        n = self._cov_counts()
+        if n == 0:
+            return
+        if not self._confirm(
+                "Discard changes",
+                "Discard %s? Saved data is not affected."
+                % _n(n, "unsaved change", "unsaved changes"),
+                ok_text="Discard changes"):
+            return
+        self._cov_revert()
 
     def _copy_cov_grid(self):
         # Locked (disabled) grid entries are not selectable — this button
@@ -2871,7 +3062,8 @@ class App(ctk.CTk):
             if lot["account"] == account:
                 lot["account_type"] = atype
         if getattr(self, "cov_lots", None) is not None and self._cov_counts():
-            self.status_var.set("Save or Revert Inputs edits first.")
+            self.status_var.set(
+                "Save or discard Inputs edits first.")
             self.tabs.set("Data Entry")
             self.data_tabs.set("Inputs")
             return
@@ -3450,7 +3642,7 @@ class App(ctk.CTk):
         # pre-delete message can survive the wipe.
         self.status_var.set("All data deleted. The app is now empty.")
 
-    # ---- position lifecycle (Add / Sell / Close / Reopen) ----
+    # ---- position lifecycle (Add / Sold / Mark closed / Reopen) ----
     def _form(self, title):
         win = ctk.CTkToplevel(self)
         win.title(title)
@@ -3564,10 +3756,10 @@ class App(ctk.CTk):
         opts, idx = self._lot_options()
         pos_opts = self._position_options()
         if not pos_opts:
-            self.status_var.set("No open positions to sell.")
+            self.status_var.set("No open positions.")
             return
         win, body, msg, entries, row = self._form(
-            "Close position" if close_all else "Sell / Reduce")
+            "Mark closed" if close_all else "Record a sale")
         method = tk.StringVar(value="fifo")
         ctk.CTkRadioButton(body, text="FIFO — oldest lots first (default)",
                           variable=method, value="fifo").pack(
@@ -3588,7 +3780,7 @@ class App(ctk.CTk):
         if close_all:
             row("Quantity (full position)", "all")
         else:
-            row("Quantity to sell")
+            row("Quantity sold")
         row("Sold date YYYY-MM-DD",
             datetime.date.today().isoformat())
         row("Sale price per share")
@@ -3600,7 +3792,7 @@ class App(ctk.CTk):
             qty = None
             if not close_all:
                 try:
-                    qty = float(entries["Quantity to sell"].get())
+                    qty = float(entries["Quantity sold"].get())
                     if qty <= 0:
                         raise ValueError
                 except ValueError:

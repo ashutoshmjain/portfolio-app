@@ -274,13 +274,88 @@ def _bounded_map(fn, items, limit=8, timeout=_FETCH_TICKER_TIMEOUT):
 
 # ================= watchlist =================
 # Overview watchlist, directly below the drift chart (watchlist first, the
-# reserved events calendar goes below it when built). Standard list is fixed
-# content — Mag 7 + SpaceX + BTC + GLD, always shown, never editable:
-# exactly Ticker | Price | Market cap ($T), no day-change columns.
-WATCHLIST_STANDARD = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
-                      "TSLA", "SPCX", "BTC", "GLD"]
+# reserved events calendar goes below it when built). The standard list is
+# grouped into asset classes with fixed content — always shown, never
+# editable. Columns stay exactly Ticker | Price | Market cap ($T), no
+# day-change columns. Standard class definitions live HERE in code (shipped,
+# committed, not user data): a first-time user sees the standard watchlists
+# immediately, even with zero positions. User-defined classes are user data:
+# they persist in profile.json (gitignored) and clear on delete-all.
+WATCHLIST_CLASSES = {
+    # The 8 mega-caps (Mag 7 + SpaceX). Class total = sum of members' caps.
+    "Octonions": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
+                  "TSLA", "SPCX"],
+    # BTC (price from BTC-USD; market cap COMPUTED as mined supply x price
+    # — BTC-USD quotes carry no market cap, so never show "--") plus the
+    # Bitcoin proxy rows. Class total = the computed Bitcoin market cap.
+    "Bitcoin": ["BTC", "MSTR", "IBIT", "ARKB"],
+    # GLD (price; market cap = the ETF's net assets, the existing fallback).
+    # Class total is COMPUTED: above-ground gold stock x live gold price
+    # (live gold price = GLD price x 10) — a different number from GLD's
+    # net assets; show both, never conflate them.
+    "Gold": ["GLD"],
+}
+WATCHLIST_CLASS_ORDER = ["Octonions", "Bitcoin", "Gold"]
+# Flat standard ticker list (class order), e.g. for the refresh fetch set.
+WATCHLIST_STANDARD = [t for c in WATCHLIST_CLASS_ORDER
+                      for t in WATCHLIST_CLASSES[c]]
 # Yahoo symbols for the non-stock entries (SpaceX trades as SPCX directly).
 WATCH_YAHOO = {"BTC": "BTC-USD"}
+# Mined-supply anchor: BTC mined by the anchor date, accrued forward at the
+# post-halving issuance rate (~450 BTC/day). Update the anchor yearly.
+BTC_SUPPLY_ANCHOR_DATE = "2026-01-01"
+BTC_SUPPLY_ANCHOR = 19_950_000.0
+BTC_SUPPLY_PER_DAY = 450.0
+# Above-ground gold stock, tonnes (World Gold Council estimate — update
+# yearly). One tonne = 1e6 g / 31.1034768 g per troy ounce.
+GOLD_TONNES_ABOVE_GROUND = 218000.0
+GOLD_OZ_PER_TONNE = 1_000_000.0 / 31.1034768
+
+
+def btc_mined_supply(today=None):
+    """Estimated BTC mined to date: anchor + 450/day. Never decreases."""
+    import datetime
+    if today is None:
+        today = datetime.date.today()
+    try:
+        anchor = datetime.date.fromisoformat(BTC_SUPPLY_ANCHOR_DATE)
+        days = max(0, (today - anchor).days)
+    except ValueError:
+        days = 0
+    return BTC_SUPPLY_ANCHOR + BTC_SUPPLY_PER_DAY * days
+
+
+def btc_class_mcap(btc_price, today=None):
+    """Computed Bitcoin market cap: mined supply x price. None without a
+    price — the BTC row and class total never show "--" when priced."""
+    if btc_price is None:
+        return None
+    return btc_mined_supply(today) * btc_price
+
+
+def gold_class_mcap(gld_price):
+    """Computed above-ground gold value: stock x live gold price
+    (GLD price x 10). None without a GLD price."""
+    if gld_price is None:
+        return None
+    return GOLD_TONNES_ABOVE_GROUND * GOLD_OZ_PER_TONNE * gld_price * 10
+
+
+def watch_class_total(name, quotes, members=None):
+    """Approx total market cap for a watchlist class, from {ticker:
+    {"price", "mcap"}} quotes. Standard classes resolve their members here;
+    user-defined classes pass members explicitly. Octonions/user sum member
+    caps; Bitcoin and Gold use their computed totals. None when uncomputable
+    (renders "--")."""
+    if name == "Bitcoin":
+        return btc_class_mcap((quotes.get("BTC") or {}).get("price"))
+    if name == "Gold":
+        return gold_class_mcap((quotes.get("GLD") or {}).get("price"))
+    if members is None:
+        members = WATCHLIST_CLASSES.get(name) or []
+    caps = [(quotes.get(t) or {}).get("mcap") for t in members]
+    caps = [c for c in caps if c is not None]
+    return sum(caps) if caps else None
 
 
 def _fi_get(fi, key):
@@ -408,16 +483,55 @@ def fetch_watchlist(tickers, cache_path):
 
 # ================= views =================
 def fmt_usd(x):
+    # House money style: exactly zero renders as a bare "-" (known-and-zero,
+    # never "$0"); negatives render in parentheses with the $ inside and no
+    # minus sign — tables color those cells red. "--" stays reserved for
+    # unknown / not computable (gains without cost, % of a $0 total);
+    # "upload" (set by the app) stays the prompt for cost awaiting entry.
+    # Never collapse "--" into "-" or vice versa.
     if x is None:
         return "--"
-    sign = "-" if x < 0 else ""
-    return "%s$%s" % (sign, f"{abs(x):,.0f}")
+    if x == 0:
+        return "-"
+    if x < 0:
+        return "($%s)" % f"{abs(x):,.0f}"
+    return "$%s" % f"{x:,.0f}"
 
 
 def fmt_pct(x):
+    # Same zero/negative rules as fmt_usd, for percentages.
     if x is None:
         return "--"
+    if x == 0:
+        return "-"
+    if x < 0:
+        return "(%.1f%%)" % abs(x * 100)
     return "%.1f%%" % (x * 100)
+
+
+def fmt_pp(x):
+    # Signed percentage-point deviations (Diversification table): positives
+    # keep their "+", negatives render parenthesized (red in tables), zero
+    # is "-". None stays "--".
+    if x is None:
+        return "--"
+    if x == 0:
+        return "-"
+    if x < 0:
+        return "(%.1fpp)" % abs(x)
+    return "+%.1fpp" % x
+
+
+def is_negative_figure(text):
+    """True when a formatted cell holds a negative figure: parenthesized
+    money/percent/pp like "($5,000)", "(2.3%)", "(1.2pp)". Plain account
+    names that merely contain parentheses ("Chase Brokerage (Lovey)")
+    never match — the whole cell must be the parenthesized figure."""
+    import re
+    t = (text or "").strip()
+    if t.startswith("**"):
+        t = t[2:]
+    return re.match(r"^\(\$?[\d,]+(\.\d+)?\s?(%|pp)?\)$", t) is not None
 
 
 def compute(positions, prices, home_value, cost_basis=None, accounts=None):
@@ -699,7 +813,13 @@ def make_allocation_chart(fig, view3):
     ax.legend(loc="upper right")
     ax.grid(axis="y", alpha=0.3)
     _darken_chart(fig, ax)
-    fig.tight_layout()
+    # Constrained layout engine (solved on every draw at the figure's real
+    # size), never tight_layout(): the manual pass ran at small transient
+    # startup sizes, gave up ("margins cannot be made large enough"), and
+    # warned on every cold launch. No warning filter — the layout genuinely
+    # succeeds. set_layout_engine is the current API (set_constrained_layout
+    # is deprecated).
+    fig.set_layout_engine("constrained")
     return ax
 
 
@@ -734,7 +854,8 @@ def make_drift_chart(fig, log_rows):
     ax.grid(True, which="major", alpha=0.35)
     ax.grid(True, which="minor", alpha=0.12)
     _darken_chart(fig, ax)
-    fig.tight_layout()
+    # Constrained layout engine — see make_allocation_chart.
+    fig.set_layout_engine("constrained")
     return ax
 
 
@@ -1360,7 +1481,7 @@ def fifo_sell(lots, account, asset, qty, sold_date, sale_price, cost=None):
 # ================= profile (profile.json) =================
 PROFILE_DEFAULTS = {
     # Neutral blanks — a fresh copy of the app knows nothing about its
-    # first owner. The user fills these in the Profile tab. NEVER seed
+    # first owner. The user fills these in Settings. NEVER seed
     # personal values here.
     "date_of_birth": "",
     "ss_owner_monthly": 0,
@@ -1379,7 +1500,13 @@ PROFILE_DEFAULTS = {
     # Medi-Cal context lives HERE, not in hardcoded copy).
     "cap_note": "",
     # Custom watchlist tickers (standard list is fixed content in code).
+    # Legacy flat list: migrated into watchlist_classes["My watchlist"]
+    # on load; new adds go to watchlist_classes directly.
     "watchlist_custom": [],
+    # User-defined watchlist classes: {class name: [tickers]}. User data —
+    # persists here (gitignored), cleared by delete-all along with the rest
+    # of the profile. Standard classes live in WATCHLIST_CLASSES in code.
+    "watchlist_classes": {},
 }
 
 

@@ -14,11 +14,18 @@ Refresh home estimates, Log, Settings.
   capacity, key alerts, a Copy summary button, then the Actual-vs-Standard
   daily-close LINE chart — blue Actual total $, red Standard total $,
   $2M–$5M / $100K steps, same shared implementation and values as
-  Diversification; then the watchlist — fixed standard 10
-  AAPL/MSFT/NVDA/AMZN/META/GOOGL/TSLA/SPCX/BTC/GLD plus your custom tickers,
-  columns Ticker | Price | Market cap ($T), prices updating only on
-  Refresh stocks; the bottom area is reserved for the future
-  upcoming-events calendar), **Accounts** (bank → account → position
+  Diversification; then the watchlist — standard asset classes
+  (Octonions: the 8 mega-caps; Bitcoin: BTC + MSTR/IBIT/ARKB proxies;
+  Gold: GLD) plus your own named watchlist classes, each with its class
+  total; BTC's cap is COMPUTED as mined supply × price (BTC-USD carries no
+  cap — never "--" when priced; supply accrues from a stored anchor at
+  ~450 BTC/day), and Gold's class total is the COMPUTED above-ground stock
+  × live gold price (GLD price × 10) — a different number from GLD's net
+  assets in its row; your classes persist in profile.json and clear on
+  delete-all while the standard classes always reappear; columns Ticker |
+  Price | Market cap ($T), prices updating only on Refresh stocks; the
+  bottom area is reserved for the future upcoming-events calendar),
+  **Accounts** (bank → account → position
   quantities, prices, values — data-driven from lots + the account
   registry, never a hardcoded list; rebuilds on every Save and refresh; $0
   totals show `--`, not 100%), **Holdings** (ONE expanding table filling
@@ -98,7 +105,17 @@ future upcoming-events calendar for portfolio holdings.)
   are never cropped by a short window (that clipping once ate x-labels,
   legends, and whole bar groups). Long labels wrap at 860px; crowded
   button rows consolidate secondary actions into a More ▾ menu instead of
-  scrolling or stacking.
+  scrolling or stacking. Both charts use the constrained layout engine
+  (solved on every draw at the figure's real size) — never a manual
+  tight_layout pass, which warned on every cold start instead of fitting.
+- Money/percent style (shared formatters, every view inherits): exactly
+  zero renders as a bare `-` (known-and-zero — `$0` / `0.0%` never appear);
+  negatives render red and in parentheses with the $ inside — `($5,000)`,
+  `(2.3%)` — never a minus sign; `--` still means unknown / not computable
+  (gains without cost, % of a $0 total) and `upload` still prompts for
+  cost awaiting entry — never collapse `--` into `-` or vice versa.
+  Positive values, thousands separators, and share quantities are
+  unchanged.
 
 ## Data model — one row per lot
 
@@ -111,7 +128,7 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
 - **Open lot:** `sold_date` and `sale_price_per_share` blank. **Closed lot:**
   both filled. Status is DERIVED from the dates — there is no status column.
 - **Partial sale = two rows** (closed sold quantity + open remainder); the
-  Sell action splits automatically, never by hand.
+  Sold action splits automatically, never by hand.
 - **Lot key = account + asset + acquired_date + cost_per_share.** Uploads
   upsert on that key (match → update, no match → insert) and NEVER delete
   rows. Two open rows sharing a key are rejected as duplicates. New dated
@@ -131,9 +148,9 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
 - Settings live in **`profile.json`** (gitignored): date of birth, monthly
   Social Security (owner + spouse), other realized gains this year + source
   note, spending base figures, the remembered backup folder, and the last
-  backup stamp, the annual net-gains cap + note, and the custom
-  watchlist. A fresh copy ships NEUTRAL blanks — no personal values are
-  seeded in the code; the user fills these in Settings (☰ menu).
+  backup stamp, the annual net-gains cap + note, and user-defined
+  watchlist classes. A fresh copy ships NEUTRAL blanks — no personal values
+  are seeded in the code; the user fills these in Settings (☰ menu).
 
 ## Data Entry (last tab)
 
@@ -141,8 +158,9 @@ Sub-tabs Inputs / Template / Danger Zone — the tab bar is the
 only navigation (the ☰ menu opens no window).
 
 - **Inputs** — OPENS on the guided one-account view by default (first
-  account with required gaps, taxable first; "Show all" is opt-in, "Guided"
-  returns; completion state when all required accounts are fed — one
+  account with required gaps, taxable first; the guided panel's "Show all"
+  leaves for the full grid, "Guided" returns; completion state when all
+  required accounts are fed — one
   account bounds the widget count, which keeps scrolling fast; the guided
   picker follows lots holding positions needing cost/dates, never
   account names without lots). Bank →
@@ -152,7 +170,8 @@ only navigation (the ☰ menu opens no window).
   **↗ Move** button expands ONLY that row's bank/account line (collapses on
   Lock/Save; never duplicates). Cash rows (`CASH_USD`, Cash-type accounts)
   render as a single **Amount ($)** field — no shares/cost/date prompts,
-  never flagged invalid, no Sell/Close (stored as shares=amount, cost=1).
+  never flagged invalid, no Sold/Mark-closed (stored as shares=amount,
+  cost=1).
   Closed lots listed per account, per-account type dropdown, per-account
   **Download template**, per-account live value (check vs broker),
   **+ Add row** inheriting the section, **+ Add account** (existing bank
@@ -163,7 +182,9 @@ only navigation (the ☰ menu opens no window).
   unlocks to a white row with dark text (dirty marker if relocked with
   unsaved edits). Typing stages only — Tab/Enter/arrows move, Save
   validates and commits with one recompute ("Save (N unsaved change(s))",
-  plain "Save" at 0), Revert discards. An empty shell row reads "register
+  plain "Save" at 0); **Discard changes** sits immediately right of Save,
+  stays greyed out at 0 staged changes, and confirms before discarding
+  ("Saved data is not affected"). An empty shell row reads "register
   the account on Save"; shares-present-but-costless rows hint "need cost". Dates are
   typeable (YYYY-MM-DD) with a picker button; the picker header reads
   "< November 2026 >" (arrows flank at top), year/month labels open
@@ -219,20 +240,26 @@ only navigation (the ☰ menu opens no window).
 - **Feed one account** — the default Inputs view (see above): one taxable
   account at a time with its broker guidance and a "N required positions to
   go" countdown, then the next incomplete account. The full grid stays
-  available via Show all.
+  available via the guided panel's "Show all" (the single path — the header
+  row carries no duplicate).
 
 ## Position lifecycle (Accounts tab buttons + Coverage grid)
 
+Record-keeping language throughout: this app places no orders and connects
+to no brokerage — every action records something that already happened at
+the brokerage.
+
 - **Add position** — bank, account (existing or new + type), asset, shares,
   optional cost + acquired date.
-- **Sell / Reduce** — FIFO by default (oldest lots first, dateless last,
-  one closed row per lot consumed), specific-lot override available.
-- **Close position** — sell-all; the row leaves holdings, enters realized
-  gains. **Reopen** clears the sold fields (also possible inline).
+- **Sold / Reduce** — records a sale: FIFO by default (oldest lots first,
+  dateless last, one closed row per lot consumed), specific-lot override
+  available.
+- **Mark closed** — records a full sale; the row leaves holdings, enters
+  realized gains. **Reopen** clears the sold fields (also possible inline).
 - **Delete lot** — per-row, with confirmation; the only way rows disappear
   (uploads never delete).
-- Selling without a cost on file records the gain as **unknown** — the app
-  never invents basis.
+- Recording a sale without a cost on file records the gain as **unknown** —
+  the app never invents basis.
 
 ## Windows setup
 
@@ -248,8 +275,9 @@ only navigation (the ☰ menu opens no window).
 
 ## Daily use
 
-- **Buy/sell**: use the Accounts tab buttons (Add / Sell / Close), edit the
-  Inputs grid, or fill a template and upload it. Then ☰ → Refresh stocks.
+- **Record buys/sells**: use the Accounts tab buttons (Add / Sold / Mark
+  closed), edit the Inputs grid, or fill a template and upload it. Then
+  ☰ → Refresh stocks.
 - **Home value**: ☰ → Refresh home estimates (blank until you set it; no
   Zillow scraper — automatic fetching only if a reliable estimate API
   appears).
@@ -267,10 +295,12 @@ only navigation (the ☰ menu opens no window).
   BASELINE_HOME and JAN1_PRICES in `portfolio_calc.py` from the new
   December snapshot.
 - **Data files** (all gitignored, never committed): `portfolio.csv`
-  (lots), `profile.json` (settings + cap + custom watchlist),
+  (lots), `profile.json` (settings + cap + user watchlist classes),
   `accounts.json` (account registry — accounts exist independent of lots),
   `drift_log.csv`, `prices_cache.json` (prices + cached watchlist quotes),
-  backups, downloaded CSVs. Delete-all wipes all five store files.
+  backups, downloaded CSVs. Delete-all wipes all five store files
+  (the custom watchlist classes clear with the profile; the standard
+  classes are fixed content in code and reappear regardless).
 
 ## Maintaining with Muse Code (Windows)
 
