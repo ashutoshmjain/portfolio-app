@@ -13,7 +13,9 @@ NEVER executes trades. Display only.
 """
 import csv
 import datetime
+import gc
 import os
+import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -27,6 +29,10 @@ PORTFOLIO_CSV = os.path.join(HERE, "portfolio.csv")
 PROFILE_JSON = os.path.join(HERE, "profile.json")
 CACHE = os.path.join(HERE, "prices_cache.json")
 DRIFT_LOG = os.path.join(HERE, "drift_log.csv")
+# Account registry: accounts exist independent of lots (a staged or
+# lot-less account is a registry entry). In the delete set, gitignored,
+# listed in the README data-files list.
+ACCOUNTS_JSON = os.path.join(HERE, "accounts.json")
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -200,9 +206,11 @@ class App(ctk.CTk):
         self.geometry("1240x860")
         self.lots = pc.load_portfolio(PORTFOLIO_CSV)
         self.profile = pc.load_profile(PROFILE_JSON)
+        self.accounts = pc.load_accounts(ACCOUNTS_JSON)
         self.positions = pc.positions_from_lots(self.lots)
         self.cost_basis = pc.cost_map_from_lots(self.lots)
         self.prices = pc.load_price_cache(CACHE)
+        self.watch = pc.load_watchlist_cache(CACHE)
         self.home_value = pc.HOME_DEFAULT
         self.data = None
         self.cov_lots = None
@@ -234,7 +242,8 @@ class App(ctk.CTk):
         # ---- Tabs ----
         # Top level: Dashboard, Diversification, Tax Harvest, Data Entry.
         # Dashboard holds Overview (landing), Accounts, Holdings, Liquidity,
-        # Tax implications. Data Entry holds Inputs, Template, Profile.
+        # Tax implications. Data Entry holds Inputs, Template, Danger Zone;
+        # Settings lives under the hamburger menu (no Profile sub-tab).
         self.tabs = ctk.CTkTabview(self)
         self.tabs.pack(fill="both", expand=True, padx=10, pady=4)
         for name in ("Dashboard", "Diversification", "Tax Harvest",
@@ -247,7 +256,7 @@ class App(ctk.CTk):
             self.dash_tabs.add(name)
         self.data_tabs = ctk.CTkTabview(self.tabs.tab("Data Entry"))
         self.data_tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        for name in ("Inputs", "Template", "Profile", "Danger Zone"):
+        for name in ("Inputs", "Template", "Danger Zone"):
             self.data_tabs.add(name)
         self.tabs.set("Dashboard")
         self.dash_tabs.set("Overview")
@@ -258,15 +267,61 @@ class App(ctk.CTk):
         self.refresh_data_window()
 
     # ---- data ----
+    def account_registry(self):
+        """Ordered union: registry entries first, then any lots-only
+        accounts (uploads can introduce accounts the registry never saw).
+        The Accounts view renders exactly this — never a hardcoded list."""
+        out = [dict(a) for a in self.accounts]
+        seen = {(a.get("bank") or "", a.get("account") or "") for a in out}
+        for lot in self.lots:
+            key = (lot.get("bank") or "", lot.get("account") or "")
+            if key[1] and key not in seen:
+                seen.add(key)
+                out.append({"bank": key[0], "account": key[1],
+                            "account_type": lot.get("account_type") or ""})
+        return out
+
+    def _sync_registry(self, shells=()):
+        """Grow the registry from the lots (+ staged shell accounts), save
+        only when it changed. Never shrinks except delete-all."""
+        have = {(a.get("bank") or "", a.get("account") or "")
+                for a in self.accounts}
+        changed = False
+        for lot in self.lots:
+            key = (lot.get("bank") or "", lot.get("account") or "")
+            if key[1] and key not in have:
+                have.add(key)
+                self.accounts.append(
+                    {"bank": key[0], "account": key[1],
+                     "account_type": lot.get("account_type") or ""})
+                changed = True
+        for bank, acct, atype in shells:
+            key = (bank or "", acct or "")
+            if key[1] and key not in have:
+                have.add(key)
+                self.accounts.append({"bank": key[0], "account": key[1],
+                                      "account_type": atype or ""})
+                changed = True
+        if changed:
+            pc.save_accounts(ACCOUNTS_JSON, self.accounts)
+
+    def registry_accounts_arg(self):
+        return [(a.get("bank") or "", a.get("account") or "",
+                 a.get("account_type") or "")
+                for a in self.account_registry()]
+
     def recompute(self):
         self.positions = pc.positions_from_lots(self.lots)
         self.cost_basis = pc.cost_map_from_lots(self.lots)
         self.data = pc.compute(self.positions, self.prices, self.home_value,
-                               self.cost_basis)
+                               self.cost_basis,
+                               accounts=self.registry_accounts_arg())
 
     def save_lots(self, msg="Data saved."):
         # File + main views only. Data Entry refresh is explicit at each
         # call site (structural rebuild vs in-place repaint, F5).
+        # Registry grows from the lots on every external commit.
+        self._sync_registry()
         pc.save_portfolio(PORTFOLIO_CSV, self.lots)
         self.recompute()
         self.build_all()
@@ -296,20 +351,63 @@ class App(ctk.CTk):
             except (tk.TclError, AttributeError):
                 pass
 
+    def watch_tickers(self):
+        """Standard 10 + user customs (deduped, uppercase)."""
+        out = list(pc.WATCHLIST_STANDARD)
+        for t in (self.profile.get("watchlist_custom") or []):
+            s = str(t).strip().upper()
+            if s and s not in out:
+                out.append(s)
+        return out
+
     def refresh_async(self):
+        # Fetch on a worker thread (network), deliver on the main thread.
+        # NOTE: tkinter widgets — including after() — may only be touched
+        # from the main thread (cross-thread after() raises RuntimeError and
+        # silently kills the refresh), so the worker posts its result to a
+        # queue and a main-thread poller picks it up. The worker also runs
+        # with GC disabled: a collection there could finalize a tkinter
+        # object, whose finalizer calls into Tk and deadlocks against the
+        # main thread's Tcl loop (seen live: Font.__del__ inside a worker
+        # yfinance import — yfinance is now imported once at startup).
         self.status_var.set("Fetching prices from Yahoo Finance…")
         tickers = sorted({p["ticker"] for p in self.positions
                           if p["ticker"] != "CASH_USD"})
+        watch = self.watch_tickers()
+        box = queue.Queue()
 
         def work():
-            prices, errors, used_cache = pc.fetch_prices(tickers, CACHE)
-            self.after(0, lambda: self._after_refresh(prices, errors,
-                                                      used_cache))
+            gc.disable()
+            try:
+                prices, errors, used_cache = pc.fetch_prices(tickers, CACHE)
+                try:
+                    wq, werr, _live = pc.fetch_watchlist(watch, CACHE)
+                except Exception as e:  # noqa: BLE001 - no crash on quotes
+                    wq, werr = {}, ["watchlist: %s" % type(e).__name__]
+                box.put((prices, errors, used_cache, wq, werr))
+            finally:
+                gc.enable()
+
+        def poll():
+            try:
+                payload = box.get_nowait()
+            except queue.Empty:
+                self.after(150, poll)
+                return
+            self._after_refresh(*payload)
 
         threading.Thread(target=work, daemon=True).start()
+        self.after(150, poll)
 
-    def _after_refresh(self, prices, errors, used_cache):
+    def _after_refresh(self, prices, errors, used_cache, watch_quotes=None,
+                       watch_errors=None):
         self.prices = prices
+        self.watch = pc.load_watchlist_cache(CACHE)
+        if watch_quotes:
+            for t, q in watch_quotes.items():
+                if isinstance(q, dict) and (q.get("price") is not None
+                                            or q.get("mcap") is not None):
+                    self.watch[t] = q
         self.recompute()
         self.build_all()
         try:
@@ -325,6 +423,10 @@ class App(ctk.CTk):
         else:
             self.status_var.set("Prices refreshed %s."
                                 % datetime.datetime.now().strftime("%H:%M"))
+        if watch_errors:
+            self.status_var.set(self.status_var.get()
+                                + " Watchlist: %s."
+                                % "; ".join(watch_errors[:2]))
 
     def log_close(self):
         d = self.data["drift"]
@@ -340,7 +442,7 @@ class App(ctk.CTk):
     # ---- hamburger menu: exactly three items ----
     def toggle_menu(self):
         """Open/close the ☰ popup: Refresh stocks, Refresh home estimates,
-        Log. Data Entry is a tab now — no window opens from here."""
+        Log, Settings. Data Entry is a tab now — no window opens from here."""
         if self.menu_win is not None and self.menu_win.winfo_exists():
             self._close_menu()
             return
@@ -359,6 +461,9 @@ class App(ctk.CTk):
                           padx=12, pady=4, fill="x")
         ctk.CTkButton(win, text="Log",
                       command=self.log_from_menu).pack(
+                          padx=12, pady=4, fill="x")
+        ctk.CTkButton(win, text="Settings",
+                      command=self.settings_from_menu).pack(
                           padx=12, pady=(4, 12), fill="x")
         self.menu_win = win
         # CustomTkinter withdraws a new Toplevel on Windows while theming
@@ -382,6 +487,10 @@ class App(ctk.CTk):
     def log_from_menu(self):
         self._close_menu()
         self.log_close()
+
+    def settings_from_menu(self):
+        self._close_menu()
+        self.open_settings()
 
     def home_from_menu(self):
         self._close_menu()
@@ -710,6 +819,7 @@ class App(ctk.CTk):
                           width=240,
                           command=self._goto_template).pack(
                               padx=10, pady=4, anchor="w")
+            self.build_watchlist(body)
             return
         tnw = self.data["tnw"]
         sp = pc.spending_capacity(self.profile)
@@ -718,7 +828,9 @@ class App(ctk.CTk):
         realized, _unk, _rows = pc.realized_gains_year(
             self.lots, year,
             self.profile.get("other_realized_gains_current_year", 0) or 0.0)
-        leeway = pc.TLH_CAP - realized
+        cap = self.profile.get("annual_net_gains_cap")
+        cap = None if cap is None else float(cap)
+        cap_note = (self.profile.get("cap_note") or "").strip()
         missing = self._required_missing()
         ctk.CTkLabel(body, text="Total net worth: %s" % money(tnw),
                      font=ctk.CTkFont(size=FS_TITLE, weight="bold")).pack(
@@ -729,11 +841,18 @@ class App(ctk.CTk):
                         money(sp["before65"]), money(sp["after65_allin"]),
                         money(sp["after65_base"])),
             font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2, anchor="w")
+        if cap is None:
+            leeway_alert = ("No net-gains cap set — set one in Settings "
+                            "(☰ menu).")
+        else:
+            leeway_alert = ("Tax-loss-harvest leeway: %s of the %s cap%s."
+                            % (money(cap - realized), money(cap),
+                               " (%s)" % cap_note if cap_note else ""))
         alerts = [
             "Drift vs standard: actual %s vs standard %s (%s)." % (
                 pct(d["actual_ytd"]), pct(d["standard_ytd"]),
                 pct(d["drift_pp"])),
-            "Tax-loss-harvest leeway: %s of the $15,000 cap." % money(leeway),
+            leeway_alert,
             "%d REQUIRED position%s still missing cost or dates — feed "
             "them in Data Entry." % (missing, "" if missing == 1 else "s")
             if missing else
@@ -760,12 +879,98 @@ class App(ctk.CTk):
         fig = Figure(figsize=(10, 4.6), dpi=100)
         pc.make_drift_chart(fig, pc.load_drift_log(DRIFT_LOG))
         self._chart_canvas(body, fig)
-        # RESERVED: Overview bottom area is held for the FUTURE
-        # upcoming-events calendar (earnings calls and other events for
-        # portfolio holdings) — related to the deferred news feed. The
-        # one-path navigation standing rule keeps the tab bar as the sole
-        # navigation; no duplicate Go-to buttons here. Do not build the
-        # calendar in this pass — this comment reserves the space.
+        self.build_watchlist(body)
+        # RESERVED: Overview bottom area below the watchlist is held for
+        # the FUTURE upcoming-events calendar (earnings calls and other
+        # events for portfolio holdings) — related to the deferred news
+        # feed. The one-path navigation standing rule keeps the tab bar
+        # as the sole navigation; no duplicate Go-to buttons here. Do not
+        # build the calendar in this pass — this comment reserves the
+        # space.
+
+    def _watch_row(self, t):
+        q = (self.watch or {}).get(t, {})
+        price = q.get("price")
+        mcap = q.get("mcap")
+        return [t, money(price),
+                "--" if mcap is None else "$%.2fT" % (mcap / 1e12)]
+
+    def build_watchlist(self, body):
+        # Market data, not portfolio data: always shown — even with zero
+        # positions (the empty-state rule hides net worth, spending, drift
+        # and alerts, never this). Prices update ONLY on Refresh stocks,
+        # the same fetch cycle as portfolio prices; cached quotes show
+        # before the first refresh. No polling, no separate refresh.
+        ctk.CTkLabel(body, text="Watchlist",
+                     font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
+                         padx=10, pady=(10, 2), anchor="w")
+        Table(body, ["Ticker", "Price", "Market cap ($T)"],
+              [self._watch_row(t) for t in pc.WATCHLIST_STANDARD]
+              ).pack(fill="x", padx=10, pady=4)
+        customs = [t for t in self.watch_tickers()
+                   if t not in pc.WATCHLIST_STANDARD]
+        row = ctk.CTkFrame(body, fg_color="transparent")
+        row.pack(fill="x", padx=10, pady=2)
+        ctk.CTkLabel(row, text="My watchlist:").pack(side="left", padx=4)
+        add_var = tk.StringVar()
+        ctk.CTkEntry(row, width=120, textvariable=add_var).pack(
+            side="left", padx=4)
+        wmsg = ctk.CTkLabel(row, text="", text_color="orange")
+        wmsg.pack(side="left", padx=4)
+        ctk.CTkButton(row, text="Add", width=80,
+                      command=lambda: self._watch_add(
+                          add_var.get(), wmsg)).pack(side="left", padx=4)
+        if customs:
+            Table(body, ["Ticker", "Price", "Market cap ($T)"],
+                  [self._watch_row(t) for t in customs]
+                  ).pack(fill="x", padx=10, pady=4)
+            rrow = ctk.CTkFrame(body, fg_color="transparent")
+            rrow.pack(fill="x", padx=10, pady=2)
+            rem_var = tk.StringVar(value=customs[0])
+            ctk.CTkOptionMenu(rrow, values=customs, variable=rem_var,
+                              width=120).pack(side="left", padx=4)
+            ctk.CTkButton(rrow, text="Remove", width=100,
+                          command=lambda: self._watch_remove(
+                              rem_var.get(), wmsg)).pack(side="left",
+                                                         padx=4)
+
+    def _watch_add(self, sym_raw, msg):
+        sym = (sym_raw or "").strip().upper()
+        customs = [t for t in self.watch_tickers()
+                   if t not in pc.WATCHLIST_STANDARD]
+        if not sym:
+            msg.configure(text="Enter a ticker symbol.")
+            return
+        if sym in pc.WATCHLIST_STANDARD or sym in customs:
+            msg.configure(text="%s is already in watchlist." % sym)
+            return
+        msg.configure(text="Fetching %s…" % sym)
+        try:
+            quotes, _err, live = pc.fetch_watchlist([sym], CACHE)
+        except Exception:  # noqa: BLE001 - never crash on quotes
+            live, quotes = set(), {}
+        if sym not in live or not quotes.get(sym, {}).get("price"):
+            msg.configure(text="Could not find ticker %s — check the "
+                               "symbol." % sym)
+            return
+        customs.append(sym)
+        self.profile["watchlist_custom"] = customs
+        pc.save_profile(PROFILE_JSON, self.profile)
+        self.watch = pc.load_watchlist_cache(CACHE)
+        self.build_overview()
+        self.status_var.set("Added %s to watchlist." % sym)
+
+    def _watch_remove(self, sym, msg):
+        customs = [t for t in self.watch_tickers()
+                   if t not in pc.WATCHLIST_STANDARD]
+        if sym in customs:
+            customs.remove(sym)
+            self.profile["watchlist_custom"] = customs
+            pc.save_profile(PROFILE_JSON, self.profile)
+            self.build_overview()
+            self.status_var.set("Removed %s from watchlist." % sym)
+        else:
+            msg.configure(text="%s is not in your watchlist." % sym)
 
     def _hold_avg_text(self, avg, missing):
         # Checklist rule: the average shows ONLY when every open lot has
@@ -815,7 +1020,7 @@ class App(ctk.CTk):
                     "missing count) and gains read --. The table is a "
                     "checklist: upload the missing cost data in Data Entry. "
                     "Cash lives in Liquidity. Home is one more row (value "
-                    "only unless a purchase price is set in the profile). "
+                    "only unless a purchase price is set in Settings). "
                     "Click ▶ on a row for its per-account breakdown.",
             wraplength=860, anchor="w").pack(padx=6, pady=6, anchor="w")
 
@@ -920,25 +1125,44 @@ class App(ctk.CTk):
 
     def build_accounts(self):
         f = self._clear_dash("Accounts")
+        # Data-driven: registry union lots. After delete-all there are no
+        # accounts — empty state, no ghost rows at $0 (Issue 1). New
+        # accounts appear here after Save (Issue 4c): this builder runs on
+        # every recompute, so no view ever serves a stale list.
+        if not self.account_registry():
+            ctk.CTkLabel(
+                f, text="No accounts yet — add your first bank / account.",
+                font=ctk.CTkFont(size=FS_HEAD, weight="bold"),
+                wraplength=860, anchor="w").pack(padx=10, pady=(24, 8),
+                                                 anchor="w")
+            ctk.CTkButton(f, text="Add your first bank / account",
+                          width=240,
+                          command=self._cov_add_account).pack(
+                              padx=10, pady=4, anchor="w")
+            return
         d = self.data
+
+        def strong(x):
+            return "**--" if x is None else "**" + pct(x)
+
         rows = []
         for r in d["view1"]:
             rows.append([r["account"], money(r["BTC & related"]),
                          money(r["Gold & silver"]), money(r["Equities"]),
                          money(r["Cash & cash-like"]), money(r["re"]),
-                         "**" + money(r["total"]), pct(r["pct"])])
+                         "**" + money(r["total"]), strong(r["pct"])])
         t = d["view1_total"]
         rows.append(["**TOTAL", "**" + money(t["BTC & related"]),
                      "**" + money(t["Gold & silver"]),
                      "**" + money(t["Equities"]),
                      "**" + money(t["Cash & cash-like"]),
                      "**" + money(t["re"]), "**" + money(t["total"]),
-                     "**100.0%"])
+                     strong(t["pct"])])
         m = d["mix"]
-        rows.append(["**Mix %", "**" + pct(m["BTC & related"]),
-                     "**" + pct(m["Gold & silver"]), "**" + pct(m["Equities"]),
-                     "**" + pct(m["Cash & cash-like"]), "**" + pct(m["re"]),
-                     "**100.0%", ""])
+        rows.append(["**Mix %", strong(m["BTC & related"]),
+                     strong(m["Gold & silver"]), strong(m["Equities"]),
+                     strong(m["Cash & cash-like"]), strong(m["re"]),
+                     strong(1.0 if t["total"] else None), ""])
         Table(f, ["Account", "BTC", "Gold", "Equities", "Cash-like",
                   "Real Estate", "Total", "% of portfolio"],
               rows).pack(fill="both", expand=True, padx=6, pady=6)
@@ -1235,16 +1459,25 @@ class App(ctk.CTk):
             Table(f, ["Sold %d — asset" % year, "Account", "Shares", "Cost $",
                       "Sale $", "Sold", "Term", "Gain $"],
                   srows).pack(fill="both", padx=6, pady=6)
-        cap = pc.TLH_CAP
+        cap = self.profile.get("annual_net_gains_cap")
+        cap = None if cap is None else float(cap)
+        cap_note = (self.profile.get("cap_note") or "").strip()
         other = self.profile.get("other_realized_gains_current_year",
                                  0) or 0.0
-        Table(f, ["%d capital-gains budget (Medi-Cal: keep net gains "
-                  "under $15K/yr)" % year, "$"],
-              [["Annual net-gains cap (your $15K guardrail)", money(cap)],
-               ["Pre-app realized gains (full note in Profile)", money(other)],
+        header = "%d annual net-gains budget" % year
+        if cap_note:
+            header += " — %s" % cap_note
+        Table(f, [header, "$"],
+              [["Annual net-gains cap%s" % (
+                  "" if cap is not None else " (unset — set in Settings)"),
+                money(cap)],
+               ["Pre-app realized gains (full note in Settings)",
+                money(other)],
                ["Realized from sold lots above", money(total - other)],
                ["**Net realized YTD", "**" + money(total)],
-               ["**Remaining budget (leeway)", "**" + money(cap - total)]],
+               ["**Remaining budget (leeway)",
+                "**" + (money(cap - total) if cap is not None
+                        else "—")]],
               ).pack(fill="both", padx=6, pady=6)
         note = ("Itemized sold rows and the pre-app field must NOT overlap "
                 "— no double-counting. ")
@@ -1258,7 +1491,7 @@ class App(ctk.CTk):
     # (Charts merged into build_diversification; Rebalance merged too.)
 
 
-    # ---- Data Entry tab (Inputs / Template / Profile) ----
+    # ---- Data Entry tab (Inputs / Template / Danger Zone) ----
     def _ensure_cov_state(self):
         if getattr(self, "cov_lots", None) is None:
             self.cov_lots = []
@@ -1278,7 +1511,6 @@ class App(ctk.CTk):
         self._ensure_cov_state()
         self.build_data_coverage()
         self.build_data_template()
-        self.build_data_profile()
         self.build_data_danger()
 
     def _clear_data_tab(self, name):
@@ -1287,43 +1519,53 @@ class App(ctk.CTk):
             w.destroy()
         return frame
 
+    def _cov_save_label(self, n):
+        if n == 0:
+            return "Save"
+        return "Save (%s)" % _n(n, "unsaved change", "unsaved changes")
+
     def build_data_coverage(self):
         f = self._clear_data_tab("Inputs")
         self.cov_nav_rows = []
         self.cov_widgets = {}
         self._cov_scroll = None
         t = self._cov_totals()
+        # Button row first (widths fit 960px with margin); the progress
+        # line sits below it so long counts never squeeze the buttons.
         top = ctk.CTkFrame(f, fg_color="transparent")
         top.pack(fill="x", padx=8, pady=(8, 2))
-        self.cov_progress = ctk.CTkLabel(
-            top, text="Positions %d of %d · Cost entered %d of %d · Dates "
-                      "entered %d of %d" % (
-                          t["holdings_ok"], t["holdings_n"], t["cost_ok"],
-                          t["cost_n"], t["acq_ok"], t["acq_n"]),
-            font=ctk.CTkFont(size=FS_BODY, weight="bold"))
-        self.cov_progress.pack(side="left", padx=4)
         n = self._cov_counts()
         self.cov_save_btn = ctk.CTkButton(
-            top, text="Save (%d)" % n, width=110,
+            top, text=self._cov_save_label(n), width=230,
             command=self._cov_save,
             state="normal" if n else "disabled")
         self.cov_save_btn.pack(side="right", padx=4)
-        ctk.CTkButton(top, text="Revert", width=80,
+        self._tooltip(self.cov_save_btn,
+                      "Staged edits not yet committed — press Save to "
+                      "validate and commit them all at once.")
+        ctk.CTkButton(top, text="Revert", width=90,
                       command=self._cov_revert).pack(side="right", padx=4)
-        ctk.CTkButton(top, text="Copy grid", width=90,
+        ctk.CTkButton(top, text="Copy grid", width=120,
                       command=self._copy_cov_grid).pack(side="right",
                                                        padx=4)
-        ctk.CTkButton(top, text="+ Add account", width=110,
+        ctk.CTkButton(top, text="+ Add account", width=160,
                       command=self._cov_add_account).pack(side="right",
                                                          padx=4)
         if self.cov_filter:
-            ctk.CTkButton(top, text="Show all", width=80,
+            ctk.CTkButton(top, text="Show all", width=100,
                           command=self._cov_show_all).pack(side="right",
                                                           padx=4)
         else:
-            ctk.CTkButton(top, text="Guided", width=90,
+            ctk.CTkButton(top, text="Guided", width=100,
                           command=self._cov_guide_start).pack(side="right",
                                                              padx=4)
+        self.cov_progress = ctk.CTkLabel(
+            f, text="Positions %d of %d · Cost entered %d of %d · Dates "
+                    "entered %d of %d" % (
+                        t["holdings_ok"], t["holdings_n"], t["cost_ok"],
+                        t["cost_n"], t["acq_ok"], t["acq_n"]),
+            font=ctk.CTkFont(size=FS_BODY, weight="bold"))
+        self.cov_progress.pack(anchor="w", padx=8)
         self.cov_warn = ctk.CTkLabel(f, text="", text_color="orange",
                                      wraplength=860, anchor="w")
         self.cov_warn.pack(padx=8, anchor="w")
@@ -1437,12 +1679,16 @@ class App(ctk.CTk):
                                                    anchor="w")
 
     def _cov_totals(self):
+        # Staged shells are accounts, not positions — exclude them from
+        # the coverage denominators.
         t = pc.coverage(
-            [self._cov_stripped(r) for r in self.cov_lots])["total"]
+            [self._cov_stripped(r) for r in self.cov_lots
+             if r.get("asset") or r.get("shares") is not None])["total"]
         t["required_left"] = sum(
             1 for r in self.cov_lots
             if pc.lot_status(r) == "Open"
             and r.get("account_type") == "Taxable"
+            and r.get("asset") and r.get("shares")
             and r.get("asset") != pc.CASH_ASSET
             and (r.get("cost") is None or not r.get("acquired")))
         return t
@@ -1955,7 +2201,10 @@ class App(ctk.CTk):
             elif field == "shares":
                 try:
                     v = float(text) if text.strip() else None
-                    is_bad = v is None or v <= 0
+                    # A staged shell intentionally carries no lot yet —
+                    # empty shares are expected, never an error.
+                    is_bad = (v is None or v <= 0) and \
+                        not self._cov_is_shell(row)
                 except ValueError:
                     is_bad = True
                 orig, is_new = self._cov_orig_field(row, "shares")
@@ -1995,6 +2244,13 @@ class App(ctk.CTk):
             parts.append("≡ %s" % money(sh))
         elif sh and co is not None:
             parts.append("≡ %s" % money(sh * co))
+        elif sh:
+            parts.append("≡ ? (need cost)")
+        elif row.get("asset"):
+            parts.append("≡ ? (need shares)")
+        elif row.get("_orig") is None:
+            parts.append("≡ ○ (empty row — fill asset + shares to add a "
+                         "lot, or leave it: the account registers on Save)")
         else:
             parts.append("≡ ? (need shares+cost)")
         if row.get("sold_date") and row.get("sale_price") and sh:
@@ -2029,7 +2285,8 @@ class App(ctk.CTk):
         if getattr(self, "cov_save_btn", None) is not None:
             try:
                 self.cov_save_btn.configure(
-                    text="Save (%d)" % n, state="normal" if n else "disabled")
+                    text=self._cov_save_label(n),
+                    state="normal" if n else "disabled")
             except (tk.TclError, ValueError):
                 pass
         if getattr(self, "cov_progress", None) is not None:
@@ -2083,8 +2340,15 @@ class App(ctk.CTk):
                 text="%s left to feed" % _n(left, "position"))
 
     def _cov_save(self):
+        # Shell rows (staged account, no lot yet) are NOT lots: exclude
+        # them from validation/merge, register their accounts instead.
+        shells = [(r.get("bank") or "", r.get("account") or "",
+                   r.get("account_type") or "")
+                  for r in self.cov_lots if self._cov_is_shell(r)]
         raw = []
         for r in self.cov_lots:
+            if self._cov_is_shell(r):
+                continue
             raw.append({
                 "bank": (r.get("bank") or ""), "account": (r.get("account")
                                                            or ""),
@@ -2134,6 +2398,8 @@ class App(ctk.CTk):
         sec_pre = sorted((l.get("bank"), l.get("account"),
                           pc.lot_status(l)) for l in self.lots)
         self.lots = new2
+        # Register staged shells (save_lots also syncs from the lots).
+        self._sync_registry(shells=shells)
         self.save_lots("Coverage saved.")
         sec_post = sorted((l.get("bank"), l.get("account"),
                            pc.lot_status(l)) for l in self.lots)
@@ -2225,10 +2491,17 @@ class App(ctk.CTk):
         except (tk.TclError, AttributeError):
             pass
 
+    def _cov_is_shell(self, row):
+        """A staged account shell: no asset AND no shares yet. Shells are
+        visible in the grid and dirty, but carry no position — Save skips
+        them for lots and registers their account instead."""
+        return not row.get("asset") and row.get("shares") is None
+
     def _cov_add_account(self):
         # Covers BOTH cases: new account under an existing bank (dropdown)
-        # or under a new bank (free text). Creates the section with its
-        # first lot row — sections only exist once rows do.
+        # or under a new bank (free text). The first lot is OPTIONAL: with
+        # bank + name + type only, an (empty) shell row is staged — the
+        # account registers on Save. Creating stages; Save commits.
         win = ctk.CTkToplevel(self)
         win.title("Add account")
         win.transient(self)
@@ -2283,41 +2556,64 @@ class App(ctk.CTk):
         bank_menu.configure(command=lambda _v: sync_bank())
 
         def save():
-            bank = bank_var.get().strip() if bank_menu.get() == "< new >" \
-                else bank_menu.get()
+            if bank_menu.get() == "< new >":
+                bank = bank_var.get().strip()
+                if not bank:
+                    msg.configure(
+                        text="Bank is required — type the new bank name.")
+                    return
+            else:
+                bank = bank_menu.get()
             acct = acct_var.get().strip()
-            if not bank or not acct:
-                msg.configure(text="Bank and account name are required.")
+            if not acct:
+                msg.configure(text="Account name is required.")
                 return
             if any(r.get("account") == acct for r in self.cov_lots):
                 msg.configure(text="That account already exists — add rows "
                                    "to its section instead.")
                 return
-            try:
-                shares = float(shares_var.get())
-                if shares <= 0:
-                    raise ValueError
-            except ValueError:
-                msg.configure(text="Shares must be a positive number.")
-                return
-            if not asset_var.get().strip() and type_menu.get() != "Cash":
-                msg.configure(text="First-lot asset is required.")
-                return
-            is_cash_acct = type_menu.get() == "Cash"
-            row = {"bank": bank, "account": acct,
-                   "account_type": type_menu.get(),
-                   "asset": asset_var.get().strip() or "CASH_USD",
-                   "shares": shares,
-                   "cost": 1.0 if is_cash_acct else None, "acquired": "",
-                   "sold_date": "", "sale_price": None,
+            atype = type_menu.get()
+            asset = asset_var.get().strip()
+            shares_raw = shares_var.get().strip()
+            # First lot is optional: neither field → shell row (account
+            # registers on Save). Either field → both required + valid.
+            if not asset and not shares_raw:
+                shares, asset_out, cost = None, "", None
+            else:
+                if atype != "Cash" and not asset:
+                    msg.configure(text="First-lot asset is required.")
+                    return
+                try:
+                    shares = float(shares_raw)
+                    if shares <= 0:
+                        raise ValueError
+                except ValueError:
+                    msg.configure(
+                        text="First-lot shares must be a positive number.")
+                    return
+                asset_out = asset or "CASH_USD"
+                cost = 1.0 if atype == "Cash" else None
+            is_shell = shares is None
+            row = {"bank": bank, "account": acct, "account_type": atype,
+                   "asset": asset_out, "shares": shares, "cost": cost,
+                   "acquired": "", "sold_date": "", "sale_price": None,
                    "_rid": self.cov_next_rid, "_orig": None, "_locked": False}
             self.cov_next_rid += 1
             self.cov_lots.append(row)
             win.destroy()
+            # Land on Inputs with the new account visible, staged and
+            # dirty-marked — Save lives here, not in the Accounts tab.
+            self.cov_filter = acct
+            self.cov_guide = acct
+            self.tabs.set("Data Entry")
+            self.data_tabs.set("Inputs")
             self.build_data_coverage()
             self._cov_scroll_to_row(row["_rid"])
-            self.status_var.set("Account %s added — fill cost/dates, then "
-                                "Save." % acct)
+            extra = "" if (is_shell or atype != "Taxable") else \
+                " — fill cost/dates first"
+            self.status_var.set(
+                "Account %s will be added when you press Save in "
+                "Data Entry → Inputs%s." % (acct, extra))
 
         ctk.CTkButton(body, text="Create account", command=save).pack(
             anchor="w", padx=4, pady=8)
@@ -2455,7 +2751,9 @@ class App(ctk.CTk):
         draw()
 
     def _cov_incomplete_required(self):
-        """Accounts (taxable first) with open lots missing cost or dates."""
+        """Accounts (taxable first) with open lots missing cost or dates.
+        Only accounts holding real positions qualify — a staged shell or
+        an account with zero lots has nothing to feed."""
         todo = []
         seen = set()
         for r in self.cov_lots:
@@ -2463,6 +2761,7 @@ class App(ctk.CTk):
             if a in seen or r.get("account_type") != "Taxable":
                 continue
             if any(x.get("account") == a and pc.lot_status(x) == "Open"
+                   and x.get("asset") and x.get("shares")
                    and x.get("asset") != pc.CASH_ASSET
                    and (x.get("cost") is None or not x.get("acquired"))
                    for x in self.cov_lots):
@@ -2502,6 +2801,11 @@ class App(ctk.CTk):
         panel = ctk.CTkFrame(f)
         panel.pack(fill="x", padx=8, pady=2)
         if self.cov_guide == "done" and not self.cov_filter:
+            if not self.cov_lots:
+                # No rows at all: the grid's own No-accounts panel speaks.
+                # Claiming "all fed" here would be the vacuous truth again.
+                panel.pack_forget()
+                return
             ctk.CTkLabel(
                 panel,
                 text="All required accounts fed — Show all to review the "
@@ -2583,6 +2887,28 @@ class App(ctk.CTk):
             row["_locked"] = True
             self.cov_lots.append(row)
         self.cov_next_rid = len(self.lots)
+        # A filter naming an account with no rows is stale (e.g. after
+        # delete-all or an upload that fed it) — the panel would show a
+        # ghost account with nothing below it. Re-point at real work.
+        have = {r.get("account") for r in self.cov_lots}
+        if getattr(self, "cov_filter", None) not in have:
+            self.cov_filter = None
+        if getattr(self, "cov_guide", None) not in (None, "done") and \
+                self.cov_guide not in have:
+            todo = self._cov_incomplete_required()
+            if todo:
+                self.cov_filter = todo[0]
+                self.cov_guide = todo[0]
+            else:
+                self.cov_guide = "done"
+        # Completion state follows the work: new required lots (upload,
+        # new account) re-point a finished guide at the first account
+        # left to feed. Show-all (guide None) is never disturbed.
+        if getattr(self, "cov_guide", None) == "done":
+            todo = self._cov_incomplete_required()
+            if todo:
+                self.cov_filter = todo[0]
+                self.cov_guide = todo[0]
 
     def _cov_stripped(self, row):
         return {k: v for k, v in row.items() if not k.startswith("_")}
@@ -2628,7 +2954,8 @@ class App(ctk.CTk):
                "+ cost): matches update, new rows insert, uploads NEVER "
                "delete rows. Uploads need NOT be complete — they merge. To "
                "replace a dataset entirely, delete all data first "
-               "(Danger Zone), then upload.",
+               "(Danger Zone — wipes lots, settings, drift log, price "
+               "cache and the account registry), then upload.",
             padx=8, pady=8, fill="x")
         bar = ctk.CTkFrame(f, fg_color="transparent")
         bar.pack(fill="x", padx=8, pady=4)
@@ -2894,7 +3221,7 @@ class App(ctk.CTk):
         """One-click backup of the filled template CSV into the remembered
         backup folder. First use asks for the folder (changeable via
         Change backup folder). Files accumulate — never overwritten.
-        Backup = filled template CSV ONLY (no profile data)."""
+        Backup = filled template CSV ONLY (no settings data)."""
         if not self._ensure_saved("back up"):
             return
         folder = self.profile.get("backup_folder") or ""
@@ -2947,11 +3274,17 @@ class App(ctk.CTk):
         # fresh label.
         self.template_msg.configure(text=msg)
 
-    def build_data_profile(self):
-        f = self._clear_data_tab("Profile")
-        self.prof_entries = {}
-        grid = ctk.CTkFrame(f, fg_color="transparent")
-        grid.pack(fill="x", padx=8, pady=8)
+    def open_settings(self):
+        # Formerly the Profile sub-tab: same fields and same save
+        # semantics, now a dialog under the ☰ menu, plus the user-set
+        # net-gains cap (blank = no cap enforced) and its note.
+        win = ctk.CTkToplevel(self)
+        win.title("Settings")
+        win.transient(self)
+        win.resizable(False, False)
+        body = ctk.CTkScrollableFrame(win, width=560, height=560)
+        body.pack(fill="both", expand=True, padx=10, pady=10)
+        entries = {}
         fields = [("date_of_birth", "Date of birth (YYYY-MM or YYYY-MM-DD)"),
                   ("ss_owner_monthly", "Owner Social Security $/mo"),
                   ("ss_spouse_monthly", "Spouse Social Security $/mo"),
@@ -2959,54 +3292,76 @@ class App(ctk.CTk):
                    "Other realized gains this year $ (pre-app history)"),
                   ("other_realized_gains_note", "Source note for the above"),
                   ("home_purchase_price",
-                   "Home purchase price $ (optional — Holdings gain %)")]
-        for i, (key, label) in enumerate(fields):
-            ctk.CTkLabel(grid, text=label).grid(row=i, column=0, padx=6,
-                                                pady=4, sticky="w")
-            ent = ctk.CTkEntry(grid, width=320)
-            ent.insert(0, str(self.profile.get(key, "")))
-            ent.grid(row=i, column=1, padx=6, pady=4, sticky="w")
-            self.prof_entries[key] = ent
-        ctk.CTkButton(grid, text="Save profile",
-                      command=self.save_profile_from_form).grid(
-                          row=len(fields), column=1, padx=6, pady=8,
-                          sticky="w")
-        sp = pc.spending_capacity(self.profile)
-        self._selectable_note(
-            f, "Spending capacity (live): BEFORE 65 %s/yr · AFTER 65 "
-               "%s/yr base + SS = %s/yr all-in. Owner is %s, turns 65 "
-               "in %s. Compare against your own actual spending."
-               % (money(sp["before65"]), money(sp["after65_base"]),
-                  money(sp["after65_allin"]),
-                  "--" if sp["age"] is None else "age %d" % sp["age"],
-                  sp["turns65"]),
-            padx=8, pady=8, fill="x")
+                   "Home purchase price $ (optional — Holdings gain %)"),
+                  ("annual_net_gains_cap",
+                   "Annual net-gains cap $/yr (blank = no cap enforced)"),
+                  ("cap_note", "Cap reason / note (shown next to budget)")]
+        for key, label in fields:
+            ctk.CTkLabel(body, text=label).pack(anchor="w", padx=4,
+                                                pady=(6, 0))
+            ent = ctk.CTkEntry(body, width=380)
+            val = self.profile.get(key, "")
+            ent.insert(0, "" if val is None else str(val))
+            ent.pack(anchor="w", padx=4, pady=2)
+            entries[key] = ent
+        msg = ctk.CTkLabel(body, text="", text_color="orange",
+                           wraplength=480, anchor="w")
+        msg.pack(anchor="w", padx=4, pady=4)
+        note = self._selectable_note(body, self._settings_summary_text(),
+                                     padx=4, pady=4, fill="x")
 
-    def save_profile_from_form(self):
-        try:
-            self.profile["date_of_birth"] = \
-                self.prof_entries["date_of_birth"].get().strip()
-            self.profile["ss_owner_monthly"] = float(
-                self.prof_entries["ss_owner_monthly"].get() or 0)
-            self.profile["ss_spouse_monthly"] = float(
-                self.prof_entries["ss_spouse_monthly"].get() or 0)
-            self.profile["other_realized_gains_current_year"] = float(
-                self.prof_entries["other_realized_gains_current_year"].get()
-                or 0)
-            self.profile["other_realized_gains_note"] = \
-                self.prof_entries["other_realized_gains_note"].get().strip()
-            home_raw = self.prof_entries["home_purchase_price"].get().strip()
-            self.profile["home_purchase_price"] = \
-                "" if not home_raw else float(home_raw.replace(",", "")
-                                              .replace("$", ""))
-        except ValueError:
-            self.status_var.set("Profile not saved — amounts must be numbers.")
-            return
-        pc.save_profile(PROFILE_JSON, self.profile)
-        self.recompute()
-        self.build_all()
-        self.refresh_data_window()
-        self.status_var.set("Profile saved.")
+        def save():
+            try:
+                self.profile["date_of_birth"] = \
+                    entries["date_of_birth"].get().strip()
+                self.profile["ss_owner_monthly"] = float(
+                    entries["ss_owner_monthly"].get() or 0)
+                self.profile["ss_spouse_monthly"] = float(
+                    entries["ss_spouse_monthly"].get() or 0)
+                self.profile["other_realized_gains_current_year"] = float(
+                    entries["other_realized_gains_current_year"].get() or 0)
+                self.profile["other_realized_gains_note"] = \
+                    entries["other_realized_gains_note"].get().strip()
+                home_raw = entries["home_purchase_price"].get().strip()
+                self.profile["home_purchase_price"] = \
+                    "" if not home_raw else float(home_raw.replace(",", "")
+                                                  .replace("$", ""))
+                cap_raw = entries["annual_net_gains_cap"].get().strip()
+                if not cap_raw:
+                    self.profile["annual_net_gains_cap"] = None
+                else:
+                    cap = float(cap_raw.replace(",", "").replace("$", ""))
+                    if cap < 0:
+                        raise ValueError
+                    self.profile["annual_net_gains_cap"] = cap
+                self.profile["cap_note"] = \
+                    entries["cap_note"].get().strip()
+            except ValueError:
+                msg.configure(
+                    text="Settings not saved — amounts must be numbers "
+                         "(cap may be blank for no cap, never negative).")
+                return
+            pc.save_profile(PROFILE_JSON, self.profile)
+            self.recompute()
+            self.build_all()
+            self.refresh_data_window()
+            self.status_var.set("Settings saved.")
+            win.destroy()
+
+        ctk.CTkButton(body, text="Save settings",
+                      command=save).pack(anchor="w", padx=4, pady=8)
+        win.after(50, lambda: (win.deiconify(), win.lift())
+                  if win.winfo_exists() else None)
+
+    def _settings_summary_text(self):
+        sp = pc.spending_capacity(self.profile)
+        return ("Spending capacity (live): BEFORE 65 %s/yr · AFTER 65 "
+                "%s/yr base + SS = %s/yr all-in. Owner is %s, turns 65 "
+                "in %s. Compare against your own actual spending."
+                % (money(sp["before65"]), money(sp["after65_base"]),
+                   money(sp["after65_allin"]),
+                   "--" if sp["age"] is None else "age %d" % sp["age"],
+                   sp["turns65"]))
 
     def build_data_danger(self):
         f = self._clear_data_tab("Danger Zone")
@@ -3021,9 +3376,10 @@ class App(ctk.CTk):
                "get a clean dataset replacement — that is why this button "
                "matters beyond re-tests.\n"
                "Delete all data wipes portfolio.csv, profile.json, "
-               "drift_log.csv and prices_cache.json. Afterwards the app is "
-               "indistinguishable from a fresh install (blank profile, no "
-               "numbers, no chart) and a re-upload restores the numbers.",
+               "drift_log.csv, prices_cache.json and accounts.json. "
+               "Afterwards the app is indistinguishable from a fresh "
+               "install (blank settings, no numbers, no chart) and a "
+               "re-upload restores the numbers.",
             padx=8, pady=8, fill="x")
         warn = ctk.CTkFrame(f, fg_color="transparent")
         warn.pack(fill="x", padx=8, pady=4)
@@ -3063,23 +3419,35 @@ class App(ctk.CTk):
     def delete_all_data(self):
         # Uploads upsert, never replace — delete-then-upload is the ONLY
         # clean-replacement path, which is why this button exists.
-        for path in (PORTFOLIO_CSV, PROFILE_JSON, DRIFT_LOG, CACHE):
+        # The account registry (accounts.json) is in the delete set too:
+        # without it the Accounts tab would keep listing ghost names at
+        # $0 after a wipe.
+        for path in (PORTFOLIO_CSV, PROFILE_JSON, DRIFT_LOG, CACHE,
+                     ACCOUNTS_JSON):
             try:
                 os.remove(path)
             except OSError:
                 pass
         self.lots = []
         self.profile = dict(pc.PROFILE_DEFAULTS)
+        self.accounts = []
         self.prices = {}
+        self.watch = {}
         self.home_value = pc.HOME_DEFAULT
         self._hold_expanded = set()
         self._liq_expanded = set()
         self._cov_reset()
+        # Drop any stale guided filter: it names accounts that no longer
+        # exist, and the empty grid would show its panel with no rows.
+        self.cov_filter = None
+        self.cov_guide = "done"
         self.recompute()
         self.build_all()
         self.refresh_data_window()
         self.danger_msg.configure(
             text="All data deleted. The app is now empty.")
+        # Reset LAST: nothing after this point may set status, so no
+        # pre-delete message can survive the wipe.
         self.status_var.set("All data deleted. The app is now empty.")
 
     # ---- position lifecycle (Add / Sell / Close / Reopen) ----

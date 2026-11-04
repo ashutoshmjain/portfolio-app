@@ -4,6 +4,7 @@ prices_cache.json
 cost_basis.csv
 portfolio.csv
 profile.json
+accounts.json
 __pycache__/
 *.pyc
 .venv/

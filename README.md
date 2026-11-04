@@ -7,16 +7,21 @@ Windows PC.
 ## What it shows
 
 Top-level tabs, in order: **Dashboard, Diversification, Tax Harvest,
-Data Entry.** The ☰ menu holds exactly three items: Refresh stocks,
-Refresh home estimates, Log.
+Data Entry.** The ☰ menu holds four items: Refresh stocks,
+Refresh home estimates, Log, Settings.
 
 - **Dashboard** — sub-tabs: **Overview** (landing: net worth, spending
   capacity, key alerts, a Copy summary button, then the Actual-vs-Standard
   daily-close LINE chart — blue Actual total $, red Standard total $,
   $2M–$5M / $100K steps, same shared implementation and values as
-  Diversification; the bottom area is reserved for the future
+  Diversification; then the watchlist — fixed standard 10
+  AAPL/MSFT/NVDA/AMZN/META/GOOGL/TSLA/SPCX/BTC/GLD plus your custom tickers,
+  columns Ticker | Price | Market cap ($T), prices updating only on
+  Refresh stocks; the bottom area is reserved for the future
   upcoming-events calendar), **Accounts** (bank → account → position
-  quantities, prices, values), **Holdings** (ONE expanding table filling
+  quantities, prices, values — data-driven from lots + the account
+  registry, never a hardcoded list; rebuilds on every Save and refresh; $0
+  totals show `--`, not 100%), **Holdings** (ONE expanding table filling
   the window, one scroll region: one row per asset aggregated across
   accounts; Avg purchase price and gains show ONLY when every open lot has
   cost — otherwise Avg reads `upload` with a missing-count tooltip and
@@ -24,7 +29,7 @@ Refresh home estimates, Log.
   row; cash lives in Liquidity),
   **Liquidity** (the sheet's Liquidity Plan tab, framed by TRUE access age:
   ONE row per institution — Chase/chase unified case-insensitively — with
-  Available now / Unlocks at 59½ (date from the Profile date of birth) /
+  Available now / Unlocks at 59½ (date from the Settings date of birth) /
   Total; Cash + Taxable + HSA count as Available now, Traditional + Roth
   IRA unlock at 59½; rows sum and expand to accounts; footer has liquid
   total, home, net worth, and years of pre-65 spending covered by
@@ -35,8 +40,9 @@ Refresh home estimates, Log.
 - **Empty state** — with ZERO positions, Overview shows no numbers, no
   chart, no alerts: only "No data yet — add your first bank / account, or
   upload a filled template" with those two actions as buttons. A fresh copy
-  ships blank defaults (no personal values in the code) — fill in the
-  Profile tab and set the home estimate via ☰ → Refresh home estimates.
+  ships blank defaults (no personal values in the code) — fill in
+  Settings (☰ menu) and set the home estimate via ☰ → Refresh home
+  estimates.
 - **Diversification** — the 15:15:35:15:20 standard + rationale, current
   position vs standard, the Target-vs-actual allocation bar chart (this tab
   only), rebalance plan (display only — NEVER executes trades), and the
@@ -44,10 +50,12 @@ Refresh home estimates, Log.
   implementation — values tie exactly; Y-axis $2M–$5M, $100K steps — the
   chart Google Sheets flattened).
 - **Tax Harvest** (view title "Tax Loss Harvesting") — per-lot unrealized
-  P&L with Long/Short holding term, realized gains from closed lots, $15K
-  Medi-Cal gains guardrail + leeway.
-- **Data Entry** (last) — sub-tabs Inputs / Template / Profile /
-  Danger Zone (see below).
+  P&L with Long/Short holding term, realized gains from closed lots, and a
+  user-set annual net-gains cap (blank = no cap enforced) with leeway math;
+  the cap and its note live in Settings.
+- **Data Entry** (last) — sub-tabs Inputs / Template /
+  Danger Zone (see below). Profile moved to Settings under the ☰ menu
+  (Refresh stocks, Refresh home estimates, Log, Settings).
 
 Deferred: an Overview news feed (earnings, Fed meetings) waits for the
 AI-embedding phase — raw feeds are noisy and curation is the value. No
@@ -123,18 +131,21 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
 - Settings live in **`profile.json`** (gitignored): date of birth, monthly
   Social Security (owner + spouse), other realized gains this year + source
   note, spending base figures, the remembered backup folder, and the last
-  backup stamp. A fresh copy ships NEUTRAL blanks — no personal values are
-  seeded in the code; the user fills these in the Profile tab.
+  backup stamp, the annual net-gains cap + note, and the custom
+  watchlist. A fresh copy ships NEUTRAL blanks — no personal values are
+  seeded in the code; the user fills these in Settings (☰ menu).
 
 ## Data Entry (last tab)
 
-Sub-tabs Inputs / Template / Profile / Danger Zone — the tab bar is the
+Sub-tabs Inputs / Template / Danger Zone — the tab bar is the
 only navigation (the ☰ menu opens no window).
 
 - **Inputs** — OPENS on the guided one-account view by default (first
   account with required gaps, taxable first; "Show all" is opt-in, "Guided"
   returns; completion state when all required accounts are fed — one
-  account bounds the widget count, which keeps scrolling fast). Bank →
+  account bounds the widget count, which keeps scrolling fast; the guided
+  picker follows lots holding positions needing cost/dates, never
+  account names without lots). Bank →
   Account → lot grid with an overall progress line. Taxable = REQUIRED,
   IRA/Roth/HSA = OPTIONAL, Cash = complete. No Bank/Account grid columns
   (shown in the section header); unlocked rows stay single-line — a per-row
@@ -145,11 +156,15 @@ only navigation (the ☰ menu opens no window).
   Closed lots listed per account, per-account type dropdown, per-account
   **Download template**, per-account live value (check vs broker),
   **+ Add row** inheriting the section, **+ Add account** (existing bank
-  from dropdown or new bank as free text, plus first lot; doubles as the
-  empty-state "Add your first bank / account" prompt). Rows are locked by
-  default; Edit unlocks to a white row with dark text (dirty marker if
-  relocked with unsaved edits). Typing stages only — Tab/Enter/arrows move,
-  Save validates and commits with one recompute, Revert discards. Dates are
+  from dropdown or new bank as free text; first lot OPTIONAL — bank + name
+  + type alone stages an empty shell that registers on Save; doubles as the
+  empty-state "Add your first bank / account" prompt, landing on Inputs
+  with the staged account visible). Rows are locked by default; Edit
+  unlocks to a white row with dark text (dirty marker if relocked with
+  unsaved edits). Typing stages only — Tab/Enter/arrows move, Save
+  validates and commits with one recompute ("Save (N unsaved change(s))",
+  plain "Save" at 0), Revert discards. An empty shell row reads "register
+  the account on Save"; shares-present-but-costless rows hint "need cost". Dates are
   typeable (YYYY-MM-DD) with a picker button; the picker header reads
   "< November 2026 >" (arrows flank at top), year/month labels open
   one-action pickers, and the popup anchors by the field without covering
@@ -189,14 +204,16 @@ only navigation (the ☰ menu opens no window).
   liquid total and net worth must match. The template carries positions,
   not prices (the clone fetches its own) and not home value (set it
   identically in the clone).
-- **Profile** — date of birth, SS amounts, other gains + note, optional home
-  purchase price (all blank by default — the user fills them in). Shows
-  live spending capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.
+- **Settings** (☰ menu dialog, formerly the Profile sub-tab) — date of
+  birth, SS amounts, other gains + note, optional home purchase price,
+  annual net-gains cap $/yr (blank = no cap enforced) + cap reason/note
+  (all blank by default — the user fills them in). Shows live spending
+  capacity: before-65 $/yr, after-65 base + SS = all-in $/yr.
 - **Danger Zone** — red-styled data-management tab. Delete all data (with
   a backup-first warning, an inline Download filled template button, and a
   type-DELETE confirmation) wipes portfolio.csv, profile.json,
-  drift_log.csv, and prices_cache.json, returning the app to the
-  fresh-install empty state; re-uploading restores the numbers. Needed
+  drift_log.csv, prices_cache.json, and accounts.json, returning the app to
+  the fresh-install empty state; re-uploading restores the numbers. Needed
   because uploads upsert, never replace — delete-then-upload is the only
   clean dataset replacement.
 - **Feed one account** — the default Inputs view (see above): one taxable
@@ -249,6 +266,11 @@ only navigation (the ☰ menu opens no window).
   (liquid $3,595K, home $931K). Every January, update BASELINE_LIQUID /
   BASELINE_HOME and JAN1_PRICES in `portfolio_calc.py` from the new
   December snapshot.
+- **Data files** (all gitignored, never committed): `portfolio.csv`
+  (lots), `profile.json` (settings + cap + custom watchlist),
+  `accounts.json` (account registry — accounts exist independent of lots),
+  `drift_log.csv`, `prices_cache.json` (prices + cached watchlist quotes),
+  backups, downloaded CSVs. Delete-all wipes all five store files.
 
 ## Maintaining with Muse Code (Windows)
 

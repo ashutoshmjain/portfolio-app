@@ -13,15 +13,24 @@ import csv
 import datetime
 import json
 import os
+import threading
+import time
+
+# Yahoo Finance client. Imported ONCE here, on the main thread, at startup:
+# a first import inside the refresh worker is fatal — the import burst can
+# trigger garbage collection of tkinter objects in that thread, and their
+# finalizers call into Tk, deadlocking against the main thread's Tcl loop.
+try:
+    import yfinance as yf
+except ImportError:
+    yf = None
 
 # ---- Constants (mirroring the sheet) ----
-ACCOUNTS = ["Wells IRA", "Wells Savings", "Chase IRA (Ashu)", "chase Savings",
-            "Chase Brokerage (Lovey)", "Schwab Roth", "Schwab living Trust",
-            "Schwab Ashu IRA", "Vanguard Brokerage", "Vanguard IRA",
-            "Health Equity", "coinbase", "cashApp"]
-LT65 = {"Wells Savings", "chase Savings", "Chase Brokerage (Lovey)",
-        "Schwab living Trust", "Vanguard Brokerage", "Health Equity",
-        "coinbase", "cashApp"}
+# Account access buckets by TYPE — never by name. A fresh copy of the app
+# must not know its first owner's account names, and new accounts must
+# appear without a code change. Traditional/Roth IRA unlock at 59½;
+# Cash/Taxable/HSA (and untyped accounts) are available now.
+LOCKED_TYPES = {"Traditional IRA", "Roth IRA"}
 
 BUCKETS = ["BTC & related", "Gold & silver", "Equities", "Cash & cash-like",
            "Real Estate (home, Zillow)"]
@@ -45,12 +54,6 @@ BASELINE_TOTAL = BASELINE_LIQUID + BASELINE_HOME
 JAN1_PRICES = {"BTC": 87413, "GLD": 398.28, "VTI": 336.31, "MSTR": 157}
 
 HOME_DEFAULT = 0
-
-# Tax-loss harvesting budget: the $15,000 cap is the rule; year-to-date
-# figures start neutral — the user fills pre-app history in the Profile tab.
-TLH_CAP = 15000
-TLH_GAINS_YTD = 0.0
-TLH_LOSSES_YTD = 0.0
 
 
 # ================= holdings =================
@@ -161,7 +164,17 @@ def load_price_cache(path):
 
 
 def save_price_cache(path, prices, as_of):
-    d = dict(prices)
+    # Preserve the watchlist section — a price refresh must not wipe it.
+    d = {}
+    try:
+        with open(path) as f:
+            old = json.load(f)
+        if isinstance(old, dict) and isinstance(old.get("watchlist"), dict):
+            d["watchlist"] = old["watchlist"]
+    except (ValueError, OSError):
+        pass
+    d.update({k: v for k, v in prices.items()
+              if isinstance(v, (int, float))})
     d["as_of"] = as_of
     with open(path, "w") as f:
         json.dump(d, f, indent=1, sort_keys=True)
@@ -171,19 +184,19 @@ def fetch_prices(tickers, cache_path):
     """Fetch last closes via yfinance, one ticker at a time.
 
     Batch yf.download is flaky (timeouts); per-ticker history() is reliable.
-    Returns (prices, errors, used_cache_any). Failures fall back to the
-    last-known cache for that ticker; a ticker with neither is None.
+    Every network call is wall-clock bounded (socket default timeout +
+    per-ticker future timeout) so a stalled quote can never wedge Refresh —
+    failures fall back to the last-known cache for that ticker; a ticker
+    with neither is None.
+    Returns (prices, errors, used_cache_any).
     """
     cache = load_price_cache(cache_path)
     prices = {}
     errors = []
-    try:
-        import yfinance as yf
-    except ImportError:
-        yf = None
+    if yf is None:
         errors.append("yfinance not installed — using last-known prices")
     if yf is not None:
-        from concurrent.futures import ThreadPoolExecutor
+        import socket
 
         def one(t):
             try:
@@ -194,8 +207,13 @@ def fetch_prices(tickers, cache_path):
                 return t, ("ERR:%s" % type(e).__name__)
             return t, None
 
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            for t, v in ex.map(one, tickers):
+        prev_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(_FETCH_SOCKET_TIMEOUT)
+        try:
+            got = _bounded_map(one, tickers)
+            for t in tickers:
+                r = got.get(t)
+                v = r[1] if r is not None else "ERR:timeout"
                 if isinstance(v, (int, float)):
                     prices[t] = v
                 else:
@@ -203,6 +221,8 @@ def fetch_prices(tickers, cache_path):
                         errors.append("%s: %s" % (t, v[4:]))
                     if t in cache:
                         prices[t] = cache[t]
+        finally:
+            socket.setdefaulttimeout(prev_timeout)
     else:
         prices = dict(cache)
     # Merge fresh prices into the cache for next time.
@@ -214,6 +234,176 @@ def fetch_prices(tickers, cache_path):
                          datetime.date.today().isoformat())
     used_cache = any(t not in fresh and t in prices for t in tickers)
     return prices, errors, used_cache
+
+
+# Wall-clock bounds for network calls (seconds). A stalled quote must
+# never wedge Refresh — failures fall back to cache.
+_FETCH_SOCKET_TIMEOUT = 20
+_FETCH_TICKER_TIMEOUT = 45
+
+
+def _bounded_map(fn, items, limit=8, timeout=_FETCH_TICKER_TIMEOUT):
+    """Run fn over items on daemon threads (limit in flight), each item
+    sharing one global deadline. A hung call keeps its (daemon) thread but
+    never blocks the caller or interpreter exit. Returns {item: result};
+    missing keys timed out. (ThreadPoolExecutor can't be used: its
+    shutdown(wait=True) blocks forever on a hung future, and its
+    non-daemon threads then wedge app exit too.)"""
+    results = {}
+    lock = threading.Lock()
+    sem = threading.Semaphore(limit)
+
+    def run(t):
+        with sem:
+            try:
+                r = fn(t)
+            except Exception as e:  # noqa: BLE001
+                r = (t, None, "ERR:worker-%s" % type(e).__name__)
+            with lock:
+                results[t] = r
+
+    workers = [threading.Thread(target=run, args=(t,), daemon=True)
+               for t in items]
+    t0 = time.monotonic()
+    for th in workers:
+        th.start()
+    for th in workers:
+        th.join(timeout=max(0.0, timeout - (time.monotonic() - t0)))
+    return results
+
+
+# ================= watchlist =================
+# Overview watchlist, directly below the drift chart (watchlist first, the
+# reserved events calendar goes below it when built). Standard list is fixed
+# content — Mag 7 + SpaceX + BTC + GLD, always shown, never editable:
+# exactly Ticker | Price | Market cap ($T), no day-change columns.
+WATCHLIST_STANDARD = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
+                      "TSLA", "SPCX", "BTC", "GLD"]
+# Yahoo symbols for the non-stock entries (SpaceX trades as SPCX directly).
+WATCH_YAHOO = {"BTC": "BTC-USD"}
+
+
+def _fi_get(fi, key):
+    try:
+        return fi[key]
+    except Exception:  # noqa: BLE001 - FastInfo shape varies by version
+        try:
+            return fi.get(key)
+        except Exception:  # noqa: BLE001
+            return None
+
+
+def load_watchlist_cache(path):
+    """Return {ticker: {"price", "mcap"}} from the cache file's watchlist
+    section. Price dicts never pollute load_price_cache (not numbers)."""
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                section = json.load(f).get("watchlist") or {}
+            return {str(t): {"price": v.get("price"), "mcap": v.get("mcap")}
+                    for t, v in section.items()
+                    if isinstance(v, dict)}
+        except (ValueError, OSError, AttributeError):
+            pass
+    return {}
+
+
+def fetch_watchlist(tickers, cache_path):
+    """Quotes + market caps for the Overview watchlist. Same cache file, a
+    separate section; failures fall back to cached quotes and never crash.
+    GLD falls back to total net assets when marketCap is absent. Returns
+    (quotes, errors, live): live = tickers with a fresh quote this run
+    (Add uses it to reject unknown symbols)."""
+    cached = load_watchlist_cache(cache_path)
+    quotes = {t: dict(cached.get(t, {"price": None, "mcap": None}))
+              for t in tickers}
+    live = set()
+    errors = []
+    if yf is None:
+        errors.append("yfinance not installed — using cached quotes")
+    if yf is not None:
+        import socket
+
+        def one(t):
+            try:
+                tk = yf.Ticker(WATCH_YAHOO.get(t, t))
+                price, mcap = None, None
+                try:
+                    fi = tk.fast_info
+                    price = _fi_get(fi, "last_price")
+                    mcap = _fi_get(fi, "market_cap")
+                except Exception:  # noqa: BLE001 - per-ticker resilience
+                    pass
+                if price is None:
+                    try:
+                        h = tk.history(period="5d")
+                        if len(h):
+                            price = float(h["Close"].iloc[-1])
+                    except Exception:  # noqa: BLE001
+                        pass
+                if mcap is None and t == "GLD":
+                    try:
+                        info = tk.info
+                        mcap = info.get("totalAssets") or \
+                            info.get("netAssets")
+                    except Exception:  # noqa: BLE001 - ETF info is flaky
+                        pass
+                if price is not None:
+                    price = round(float(price), 2)
+                if mcap is not None:
+                    mcap = float(mcap)
+                return t, price, mcap
+            except Exception as e:  # noqa: BLE001
+                return t, None, "ERR:%s" % type(e).__name__
+
+        prev_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(_FETCH_SOCKET_TIMEOUT)
+        try:
+            got = _bounded_map(one, tickers)
+            for t in tickers:
+                r = got.get(t)
+                if r is None:
+                    price, mcap = None, "ERR:timeout"
+                else:
+                    _t, price, mcap = r
+                if isinstance(mcap, str) and mcap.startswith("ERR"):
+                    errors.append("%s: %s" % (t, mcap[4:]))
+                    continue
+                if price is not None:
+                    if mcap is None:
+                        mcap = quotes[t].get("mcap")
+                    quotes[t] = {"price": price, "mcap": mcap}
+                    live.add(t)
+                elif quotes[t].get("price") is None:
+                    errors.append("%s: no quote (offline and "
+                                  "uncached)" % t)
+        finally:
+            socket.setdefaulttimeout(prev_timeout)
+    else:
+        for t in tickers:
+            if quotes[t].get("price") is None:
+                errors.append("%s: no quote (offline and uncached)" % t)
+    try:
+        with open(cache_path) as f:
+            d = json.load(f)
+        if not isinstance(d, dict):
+            d = {}
+    except (ValueError, OSError):
+        d = {}
+    section = d.get("watchlist")
+    if not isinstance(section, dict):
+        section = {}
+    for t in tickers:
+        if quotes[t].get("price") is not None or \
+                quotes[t].get("mcap") is not None:
+            section[t] = quotes[t]
+    d["watchlist"] = section
+    try:
+        with open(cache_path, "w") as f:
+            json.dump(d, f, indent=1, sort_keys=True)
+    except OSError:
+        pass
+    return quotes, errors, live
 
 
 # ================= views =================
@@ -230,8 +420,10 @@ def fmt_pct(x):
     return "%.1f%%" % (x * 100)
 
 
-def compute(positions, prices, home_value, cost_basis=None):
-    """Compute all views. prices: {ticker: price}; missing -> value None."""
+def compute(positions, prices, home_value, cost_basis=None, accounts=None):
+    """Compute all views. prices: {ticker: price}; missing -> value None.
+    accounts: ordered [(bank, account, type)] union of the registry and the
+    lots (built by the caller); None derives names from positions."""
     cost_basis = cost_basis or {}
     # Position values.
     for p in positions:
@@ -249,30 +441,44 @@ def compute(positions, prices, home_value, cost_basis=None):
     liquid = sum(p["value"] for p in positions if p["value"] is not None)
     tnw = liquid + home_value
 
-    # View 1 — Accounts.
+    # View 1 — Accounts. Data-driven: the caller passes the ordered
+    # (bank, account, type) union of the account registry and the lots, so
+    # a fresh or wiped app shows no ghost accounts and new accounts appear
+    # after Save. NEVER a hardcoded name list here. A 0/0 total is not
+    # 100% — pct/mix stay None (rendered "--") when the total is $0.
+    if accounts is None:
+        seen = []
+        for p in positions:
+            if p["account"] not in seen:
+                seen.append(p["account"])
+        accounts = [(None, a, None) for a in seen]
     v1 = []
-    for acct in ACCOUNTS:
+    for _bank, acct, atype in accounts:
         vals = {b: bsum(b, acct) for b in BUCKETS[:4]}
         total = sum(vals.values())
-        v1.append({"account": acct, **vals, "re": 0.0, "total": total,
-                   "pct": (total / tnw) if tnw else 0.0})
-    v1.append({"account": "Real Estate (home)", "BTC & related": 0.0,
+        v1.append({"account": acct, "type": atype or "",
+                   "locked": (atype or "") in LOCKED_TYPES,
+                   **vals, "re": 0.0, "total": total,
+                   "pct": (total / tnw) if tnw else None})
+    v1.append({"account": "Real Estate (home)", "type": "", "locked": True,
+               "BTC & related": 0.0,
                "Gold & silver": 0.0, "Equities": 0.0, "Cash & cash-like": 0.0,
                "re": home_value, "total": home_value,
-               "pct": (home_value / tnw) if tnw else 0.0})
+               "pct": (home_value / tnw) if tnw else None})
     totals = {b: sum(r[b] for r in v1[:-1]) for b in BUCKETS[:4]}
     totals["re"] = home_value
     total_all = sum(totals.values())
-    v1_total = {"account": "TOTAL", **totals, "total": total_all, "pct": 1.0}
-    mix = {b: (totals[b] / total_all) if total_all else 0.0
+    v1_total = {"account": "TOTAL", **totals, "total": total_all,
+                "pct": 1.0 if tnw else None}
+    mix = {b: ((totals[b] / total_all) if total_all else None)
            for b in BUCKETS[:4]}
-    mix["re"] = (home_value / total_all) if total_all else 0.0
+    mix["re"] = (home_value / total_all) if total_all else None
 
-    # View 2 — Liquidity.
-    lt = sum(r["total"] for r in v1 if r["account"] in LT65)
+    # View 2 — Liquidity (type-based, not name-based).
+    lt = sum(r["total"] for r in v1
+             if not r["locked"] and r["account"] != "Real Estate (home)")
     gt = sum(r["total"] for r in v1
-             if r["account"] not in LT65
-             and r["account"] not in ("Real Estate (home)",))
+             if r["locked"] and r["account"] != "Real Estate (home)")
     v2 = {"lt": lt, "gt": gt, "re": home_value, "tnw": tnw,
           "lt_pct": lt / tnw if tnw else 0.0,
           "gt_pct": gt / tnw if tnw else 0.0,
@@ -356,9 +562,6 @@ def compute(positions, prices, home_value, cost_basis=None):
         r["rank"] = i
     for r in v5:
         r.setdefault("rank", None)
-    net = TLH_GAINS_YTD + TLH_LOSSES_YTD
-    budget = {"cap": TLH_CAP, "gains": TLH_GAINS_YTD,
-              "losses": TLH_LOSSES_YTD, "net": net, "left": TLH_CAP - net}
 
     # Drift — calendar-year baseline (sheet's drift block).
     today = datetime.date.today()
@@ -395,7 +598,7 @@ def compute(positions, prices, home_value, cost_basis=None):
     }
     return {"positions": positions, "liquid": liquid, "tnw": tnw,
             "view1": v1, "view1_total": v1_total, "mix": mix, "view2": v2,
-            "view3": v3, "view4": v4, "view5": v5, "budget": budget,
+            "view3": v3, "view4": v4, "view5": v5,
             "drift": drift}
 
 
@@ -1169,6 +1372,14 @@ PROFILE_DEFAULTS = {
     "spending_after65_base_annual": 0,
     # Home purchase price (optional — Holdings shows value-only without it).
     "home_purchase_price": "",
+    # Annual net-gains cap (display-only guardrail + leeway math). BLANK
+    # default: no cap enforced until the user sets one in Settings.
+    "annual_net_gains_cap": None,
+    # Optional free-text reason shown next to the budget (e.g. the owner's
+    # Medi-Cal context lives HERE, not in hardcoded copy).
+    "cap_note": "",
+    # Custom watchlist tickers (standard list is fixed content in code).
+    "watchlist_custom": [],
 }
 
 
@@ -1186,6 +1397,35 @@ def load_profile(path):
 def save_profile(path, prof):
     with open(path, "w") as f:
         json.dump(prof, f, indent=1, sort_keys=True)
+
+
+# ================= account registry (accounts.json) =================
+# Accounts exist independent of lots: a staged or lot-less account is a
+# registry entry, and the Accounts view renders the registry union lots.
+# Uploads never delete, so the registry only grows — except delete-all,
+# which removes this file (it is in the delete set, gitignored).
+def load_accounts(path):
+    """Return [{bank, account, account_type}]. Missing/corrupt -> []."""
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                d = json.load(f)
+            out = []
+            for a in (d.get("accounts") if isinstance(d, dict) else d) or []:
+                if isinstance(a, dict) and a.get("account"):
+                    out.append({"bank": str(a.get("bank") or ""),
+                                "account": str(a.get("account") or ""),
+                                "account_type": str(a.get("account_type")
+                                                   or "")})
+            return out
+        except (ValueError, OSError):
+            pass
+    return []
+
+
+def save_accounts(path, accounts):
+    with open(path, "w") as f:
+        json.dump({"accounts": accounts}, f, indent=1, sort_keys=True)
 
 
 def spending_capacity(prof, today=None):
