@@ -345,6 +345,7 @@ class App(ctk.CTk):
         self.lots = pc.load_portfolio(PORTFOLIO_CSV)
         self.profile = pc.load_profile(PROFILE_JSON)
         self._migrate_watchlist()
+        key_note = self._migrate_rentcast_key()
         self.accounts = pc.load_accounts(ACCOUNTS_JSON)
         self.positions = pc.positions_from_lots(self.lots)
         self.cost_basis = pc.cost_map_from_lots(self.lots)
@@ -354,7 +355,12 @@ class App(ctk.CTk):
         self._sync_home()
         self.data = None
         self.cov_lots = None
+        # Live scroll regions by stable key (re-registered on every build;
+        # _keep_scrolls snapshots/restores fractions across rebuilds).
+        self._scroll_keep = {}
         self.status_var = tk.StringVar(value="Ready — open the ☰ menu.")
+        if key_note:
+            self.status_var.set(key_note)
 
         # ---- Top bar (slim: actions live in the hamburger menu so a
         # narrow split-screen window never chops them) ----
@@ -476,21 +482,52 @@ class App(ctk.CTk):
             self._cov_reset()
         self.refresh_data_window()
 
-    def _cov_keep_scroll(self, fn):
-        scroll = getattr(self, "_cov_scroll", None)
-        y = None
-        try:
-            if scroll is not None and scroll.winfo_exists():
-                y = scroll._parent_canvas.yview()
-        except (tk.TclError, AttributeError):
-            y = None
-        fn()
-        if y:
+    def _snap_scrolls(self, names):
+        """Fractions for the named scroll regions (registry holds the live
+        widgets). Fractions — not widget refs — survive the rebuild."""
+        snapped = {}
+        for name in names:
+            w = self._scroll_keep.get(name)
+            if w is None:
+                continue
             try:
-                scroll._parent_canvas.yview_moveto(y[0])
-                scroll._parent_canvas.update_idletasks()
+                if not w.winfo_exists():
+                    continue
+            except (tk.TclError, AttributeError):
+                continue
+            try:
+                if isinstance(w, ctk.CTkScrollableFrame):
+                    snapped[name] = w._parent_canvas.yview()
+                else:  # guide textbox
+                    snapped[name] = w.yview()
             except (tk.TclError, AttributeError):
                 pass
+        return snapped
+
+    def _restore_scrolls(self, snapped):
+        for name, y in snapped.items():
+            w = self._scroll_keep.get(name)
+            if w is None:
+                continue
+            try:
+                if isinstance(w, ctk.CTkScrollableFrame):
+                    w._parent_canvas.yview_moveto(y[0])
+                else:
+                    w.yview_moveto(y[0])
+            except (tk.TclError, AttributeError, TypeError):
+                pass
+
+    def _keep_scrolls(self, fn, names):
+        # Every edit-triggered rebuild preserves scroll position: snapshot
+        # the fractions, rebuild (widgets are recreated and re-registered),
+        # restore on the new widgets. Views never jump to the top after an
+        # add, remove, delete, or edit.
+        snapped = self._snap_scrolls(names)
+        fn()
+        self._restore_scrolls(snapped)
+
+    def _cov_keep_scroll(self, fn):
+        self._keep_scrolls(fn, ("coverage",))
 
     def _migrate_watchlist(self):
         # One-time fold of the legacy flat watchlist_custom into a named
@@ -523,6 +560,9 @@ class App(ctk.CTk):
         if "watchlist_classes" in data and \
                 not isinstance(data["watchlist_classes"], dict):
             return "'watchlist_classes' must be an object"
+        if "watchlist_names" in data and \
+                not isinstance(data["watchlist_names"], dict):
+            return "'watchlist_names' must be an object"
         if "rentcast_key" in data and \
                 not isinstance(data["rentcast_key"], str):
             return "'rentcast_key' must be text"
@@ -705,6 +745,39 @@ class App(ctk.CTk):
         self.open_settings()
 
     # ---- home value: Properties list + RentCast auto-estimates ----
+    @staticmethod
+    def _looks_like_address(value):
+        # RentCast keys are opaque tokens: no spaces, no commas. A value
+        # with either was typed into the wrong field (the Prompt-7
+        # screenshot: the home address sitting in the key field).
+        v = (value or "").strip()
+        return bool(v) and ("," in v or any(ch.isspace() for ch in v))
+
+    def _migrate_rentcast_key(self):
+        """Heal keys saved before address-validation existed: an
+        address-like stored key is the home address typed into the wrong
+        field, and the server rejects it with 401. If no properties exist
+        yet, move it to a property address (preserving the user's data and
+        fixing Refresh in one stroke); otherwise clear it. Either way the
+        401 cannot recur from this cause. Returns a status note or ""."""
+        key = (self.profile.get("rentcast_key") or "").strip()
+        if not self._looks_like_address(key):
+            return ""
+        if not self._properties():
+            self.profile["properties"] = [{
+                "address": key, "applied_value": 0.0,
+                "last_estimate": None, "last_source": "",
+                "last_asof": ""}]
+            note = ("The saved RentCast key looked like a street address, "
+                    "so it was moved to Properties as your home address — "
+                    "paste the real key in Settings.")
+        else:
+            note = ("The saved RentCast key looked like a street address, "
+                    "so it was cleared — paste the real key in Settings.")
+        self.profile["rentcast_key"] = ""
+        pc.save_profile(PROFILE_JSON, self.profile)
+        return note
+
     def _properties(self):
         props = self.profile.get("properties") or []
         return [dict(p) for p in props if isinstance(p, dict)]
@@ -724,18 +797,25 @@ class App(ctk.CTk):
         self.home_value = self._home_total()
 
     def _home_rows(self):
-        """[(label, applied)] for Holdings: one row per property. Label is
-        the address, falling back to the legacy single-home name."""
+        """[(label, applied)] for Holdings: one row per property. The cell
+        shows a short tag ("RE 1", "RE 2", …) so the row's numbers align
+        under the column headers; the full address goes in the legend
+        below the table (_home_legend)."""
         rows = []
-        for p in self._properties():
+        for i, p in enumerate(self._properties()):
             try:
                 val = float(p.get("applied_value") or 0)
             except (TypeError, ValueError):
                 val = 0.0
-            label = (p.get("address") or "").strip() or \
-                "Home (real estate)"
-            rows.append((label, val))
+            rows.append(("RE %d" % (i + 1), val))
         return rows
+
+    def _home_legend(self):
+        """[(tag, address)] matching _home_rows, for the legend below the
+        Holdings table."""
+        return [("RE %d" % (i + 1),
+                 (p.get("address") or "").strip() or "(no address)")
+                for i, p in enumerate(self._properties())]
 
     def home_from_menu(self):
         self._close_menu()
@@ -916,6 +996,12 @@ class App(ctk.CTk):
         return frame
 
     def build_all(self):
+        self._keep_scrolls(self._build_all_inner,
+                           ("overview", "accounts", "holdings",
+                            "liquidity", "taximplic", "diversification",
+                            "tax"))
+
+    def _build_all_inner(self):
         # Main views only — Data Entry refresh is explicit at each call
         # site (structural rebuild vs in-place repaint, fix 5).
         self.build_overview()
@@ -1203,11 +1289,15 @@ class App(ctk.CTk):
         self.data_tabs.set("Template")
 
     def build_overview(self):
+        self._keep_scrolls(self._build_overview_inner, ("overview",))
+
+    def _build_overview_inner(self):
         f = self._clear_dash("Overview")
         # One vertical scroll region for the whole view: the chart keeps
         # its full figure height at any window size instead of being
         # cropped by a short window (lost x-labels, legends, bar groups).
         body = ctk.CTkScrollableFrame(f)
+        self._scroll_keep["overview"] = body
         body.pack(fill="both", expand=True)
         if not self.positions:
             # DATA-DRIVEN empty state: zero positions means no numbers, no
@@ -1302,6 +1392,7 @@ class App(ctk.CTk):
     def _watch_row(self, t):
         q = (self.watch or {}).get(t, {})
         price = q.get("price")
+        t = self._watch_label(t)
         if t == "BTC" and price is not None:
             # BTC-USD quotes carry no market cap: COMPUTE mined supply x
             # price, so the row never shows "--" when priced.
@@ -1429,39 +1520,133 @@ class App(ctk.CTk):
                     "resolve", "ssl", "http error", "network", "retries",
                     "unreachable", "failed to", "eof", "remote end")
 
-    def _watch_add(self, classname, sym_raw, msg):
-        sym = (sym_raw or "").strip().upper()
-        classes = self._watch_user_classes()
-        if classname not in classes:
-            msg.configure(text="%s is not a watchlist class." % classname)
-            return
-        if not sym:
-            msg.configure(text="Enter a ticker symbol.")
-            return
-        if sym in self.watch_tickers():
-            msg.configure(text="%s is already in watchlist." % sym)
-            return
-        msg.configure(text="Fetching %s…" % sym)
+    def _watch_label(self, t):
+        # "SQ — Block Inc." once a company-name search resolved it (name
+        # stored in the profile); bare ticker otherwise.
+        name = (self.profile.get("watchlist_names") or {}).get(t)
+        return "%s — %s" % (t, name) if name else t
+
+    def _watch_fetch_status(self, sym):
+        """(status, quotes): 'ok' | 'offline' | 'unknown'. A valid symbol
+        with no network or no cached data is never 'unknown'."""
         try:
             quotes, errs, live = pc.fetch_watchlist([sym], CACHE)
         except Exception:  # noqa: BLE001 - never crash on quotes
-            live, quotes, errs = set(), {}, ["fetch failed"]
-        if sym not in live or not quotes.get(sym, {}).get("price"):
-            blob = " ".join(errs or []).lower()
-            if any(m in blob for m in self._NET_MARKERS):
-                msg.configure(
-                    text="Could not fetch %s right now (no network or no "
-                         "saved data) — not added, but the symbol may be "
-                         "valid. Try again after Refresh stocks." % sym)
-            else:
-                msg.configure(text="Could not find ticker %s — check the "
-                                   "symbol." % sym)
-            return
-        classes[classname] = classes[classname] + [sym]
+            return "offline", {}
+        if sym in live and quotes.get(sym, {}).get("price"):
+            return "ok", quotes
+        blob = " ".join(errs or []).lower()
+        if any(m in blob for m in self._NET_MARKERS):
+            return "offline", quotes
+        return "unknown", quotes
+
+    def _watch_commit(self, classname, sym, msg, name=None):
+        classes = self._watch_user_classes()
+        classes[classname] = classes.get(classname, []) + [sym]
+        if name:
+            names = dict(self.profile.get("watchlist_names") or {})
+            names[sym] = name
+            self.profile["watchlist_names"] = names
         self._watch_save_classes(classes)
         self.watch = pc.load_watchlist_cache(CACHE)
         self.build_overview()
         self.status_var.set("Added %s to %s." % (sym, classname))
+
+    def _watch_add(self, classname, sym_raw, msg):
+        raw = (sym_raw or "").strip()
+        classes = self._watch_user_classes()
+        if classname not in classes:
+            msg.configure(text="%s is not a watchlist class." % classname)
+            return
+        if not raw:
+            msg.configure(text="Enter a ticker symbol or company name.")
+            return
+        sym = raw.upper()
+        if sym in self.watch_tickers():
+            msg.configure(text="%s is already in watchlist." % sym)
+            return
+        msg.configure(text="Fetching %s…" % sym)
+        status, _quotes = self._watch_fetch_status(sym)
+        if status == "ok":
+            self._watch_commit(classname, sym, msg)
+            return
+        if status == "offline":
+            msg.configure(
+                text="Could not fetch %s right now (no network or no "
+                     "saved data) — not added, but the symbol may be "
+                     "valid. Try again after Refresh stocks." % sym)
+            return
+        # Unknown as a symbol — resolve as a company name via the price
+        # feed's symbol search instead of upper-casing it into a fake one.
+        results, err = pc.search_tickers(raw)
+        if err:
+            msg.configure(
+                text="Could not search for '%s' right now (no network?) — "
+                     "try again after Refresh stocks." % raw)
+            return
+        if not results:
+            msg.configure(text="No match for '%s' — try the ticker "
+                               "symbol." % raw)
+            return
+        picked = self._watch_pick_symbol(raw, results)
+        if not picked:
+            msg.configure(text="")
+            return
+        sym2, name2 = picked
+        if sym2 in self.watch_tickers():
+            msg.configure(text="%s is already in watchlist." % sym2)
+            return
+        status2, _quotes2 = self._watch_fetch_status(sym2)
+        if status2 != "ok":
+            if status2 == "offline":
+                msg.configure(
+                    text="Could not fetch %s right now (no network or no "
+                         "saved data) — not added. Try again after "
+                         "Refresh stocks." % sym2)
+            else:
+                msg.configure(text="Could not find ticker %s — check the "
+                                   "symbol." % sym2)
+            return
+        self._watch_commit(classname, sym2, msg, name=name2)
+
+    def _watch_pick_symbol(self, query, results):
+        """One button per match — the user confirms the resolution.
+        Returns (symbol, name) or None on cancel."""
+        win = ctk.CTkToplevel(self)
+        win.title("Add ticker")
+        win.transient(self)
+        win.resizable(False, False)
+        win.grab_set()
+        SelectableMsg(win, text="Matches for '%s' — pick one:" % query
+                      ).pack(padx=16, pady=(14, 6), anchor="w")
+        picked = {"sym": None}
+
+        def choose(sym, name):
+            picked["sym"] = (sym, name)
+            win.destroy()
+
+        for sym, name, exch in results:
+            label = "%s — %s%s" % (sym, name or "?",
+                                   " (%s)" % exch if exch else "")
+            ctk.CTkButton(win, text=label[:48], width=340,
+                          command=lambda s=sym, n=name: choose(s, n)
+                          ).pack(padx=16, pady=2, anchor="w")
+        ctk.CTkButton(win, text="Cancel", width=120,
+                      command=win.destroy).pack(padx=16, pady=(6, 14),
+                                               anchor="w")
+        self.wait_window(win)
+        return picked["sym"]
+
+    def _drop_watch_name(self, sym):
+        # A resolved company name belongs to its ticker's presence: drop
+        # it once no class lists the ticker anymore.
+        if any(sym in tickers
+               for _c, tickers in self.watch_classes()):
+            return
+        names = dict(self.profile.get("watchlist_names") or {})
+        if sym in names:
+            del names[sym]
+            self.profile["watchlist_names"] = names
 
     def _watch_remove(self, classname, sym):
         classes = self._watch_user_classes()
@@ -1469,6 +1654,8 @@ class App(ctk.CTk):
         if sym in members:
             classes[classname] = [t for t in members if t != sym]
             self._watch_save_classes(classes)
+            self._drop_watch_name(sym)
+            pc.save_profile(PROFILE_JSON, self.profile)
             self.build_overview()
             self.status_var.set("Removed %s from %s." % (sym, classname))
         else:
@@ -1502,8 +1689,12 @@ class App(ctk.CTk):
                 "undo." % (name, _n(len(classes[name]), "ticker")),
                 ok_text="Delete class"):
             return
+        gone = classes[name]
         del classes[name]
         self._watch_save_classes(classes)
+        for t in gone:
+            self._drop_watch_name(t)
+        pc.save_profile(PROFILE_JSON, self.profile)
         self.build_overview()
         self.status_var.set("Deleted watchlist class %s." % name)
 
@@ -1537,6 +1728,7 @@ class App(ctk.CTk):
             self.profile.get("home_purchase_price") or None,
             homes=home_rows or None)
         scroll = ctk.CTkScrollableFrame(f)
+        self._scroll_keep["holdings"] = scroll
         scroll.pack(fill="both", expand=True, padx=6, pady=6)
         header = ctk.CTkFrame(scroll, fg_color="transparent")
         header.pack(fill="x", padx=4)
@@ -1575,6 +1767,12 @@ class App(ctk.CTk):
                 text_color="red" if col == 5 and not gain_unknown
                 and tot_gain < 0 else None).grid(row=0, column=col + 1,
                                                 padx=2, sticky="w")
+        legend = self._home_legend()
+        if legend:
+            self._selectable_note(
+                scroll, "\n".join("%s — %s" % (tag, addr)
+                                  for tag, addr in legend),
+                padx=10, pady=(2, 4), fill="x")
         ctk.CTkButton(f, text="Copy table", width=110,
                       command=lambda: self._copy_holdings(rows)
                       ).pack(padx=6, pady=(6, 0), anchor="w")
@@ -1609,6 +1807,8 @@ class App(ctk.CTk):
             money(sum(r["value"] for r in rows
                       if r["value"] is not None)),
             "--" if gain_unknown else money(tot_gain), ""]))
+        for tag, addr in self._home_legend():
+            lines.append("%s — %s" % (tag, addr))
         self._to_clipboard("\n".join(lines), "Holdings table copied — paste "
                                              "anywhere.")
 
@@ -1738,6 +1938,7 @@ class App(ctk.CTk):
         # One scroll region for the view: the full-height table lives in
         # a single scrollable; the action bar stays fixed below it.
         body = ctk.CTkScrollableFrame(f)
+        self._scroll_keep["accounts"] = body
         body.pack(fill="both", expand=True, padx=6, pady=6)
         Table(body, ["Account", "BTC", "Gold", "Equities", "Cash-like",
                      "Real Estate", "Total", "% of portfolio"],
@@ -1781,6 +1982,7 @@ class App(ctk.CTk):
         scroll = ctk.CTkScrollableFrame(f)
         scroll.pack(fill="both", expand=True, padx=6, pady=6)
         self._liq_scroll = scroll
+        self._scroll_keep["liquidity"] = scroll
         header = ctk.CTkFrame(scroll, fg_color="transparent")
         header.pack(fill="x", padx=4)
         for col, (txt, w) in enumerate(
@@ -1907,6 +2109,7 @@ class App(ctk.CTk):
         f = self._clear_dash("Tax implications")
         # One scroll region for the view (both tables full-height inside).
         body = ctk.CTkScrollableFrame(f)
+        self._scroll_keep["taximplic"] = body
         body.pack(fill="both", expand=True)
         self._selectable_note(
             body, "What each account type means for tax and withdrawals "
@@ -1930,6 +2133,7 @@ class App(ctk.CTk):
         # One vertical scroll region: tables + both charts keep full height
         # at any window size instead of being cropped (see build_overview).
         body = ctk.CTkScrollableFrame(f)
+        self._scroll_keep["diversification"] = body
         body.pack(fill="both", expand=True)
         self._selectable_note(
             body, "The standard — 15:15:35:15:20 of total net worth\n"
@@ -2027,6 +2231,7 @@ class App(ctk.CTk):
                          padx=6, pady=(6, 0), anchor="w")
         # One scroll region for the view: all tables full-height inside.
         body = ctk.CTkScrollableFrame(f)
+        self._scroll_keep["tax"] = body
         body.pack(fill="both", expand=True)
         year = datetime.date.today().year
         prices = self.prices
@@ -2140,6 +2345,10 @@ class App(ctk.CTk):
                 self.cov_guide = "done"
 
     def refresh_data_window(self):
+        self._keep_scrolls(self._refresh_data_window_inner,
+                           ("coverage", "template_guide"))
+
+    def _refresh_data_window_inner(self):
         self._ensure_cov_state()
         self.build_data_coverage()
         self.build_data_template()
@@ -2157,6 +2366,9 @@ class App(ctk.CTk):
         return "Save (%s)" % _n(n, "unsaved change", "unsaved changes")
 
     def build_data_coverage(self):
+        self._keep_scrolls(self._build_data_coverage_inner, ("coverage",))
+
+    def _build_data_coverage_inner(self):
         f = self._clear_data_tab("Inputs")
         self.cov_nav_rows = []
         self.cov_widgets = {}
@@ -2244,6 +2456,7 @@ class App(ctk.CTk):
         scroll = ctk.CTkScrollableFrame(f)
         scroll.pack(fill="both", expand=True, padx=8, pady=8)
         self._cov_scroll = scroll
+        self._scroll_keep["coverage"] = scroll
         groups = {}
         for row in self.cov_lots:
             groups.setdefault(row.get("bank") or "?",
@@ -3695,6 +3908,7 @@ class App(ctk.CTk):
                                                            anchor="w")
         # One scrollable text block, not per-cell labels (fast scrolling).
         guide = ctk.CTkTextbox(f, wrap="word")
+        self._scroll_keep["template_guide"] = guide
         guide.pack(fill="both", expand=True, padx=8, pady=4)
         lines = []
         for g in BROKER_GUIDE:
@@ -4135,7 +4349,7 @@ class App(ctk.CTk):
             key = key_ent.get().strip()
             # An address-like value is flagged plainly, never silently
             # stored as a key (API keys have no spaces or commas).
-            if key and ("," in key or any(ch.isspace() for ch in key)):
+            if self._looks_like_address(key):
                 msg.configure(
                     text="That looks like a street address, not a RentCast "
                          "key — put the address in a Properties address "

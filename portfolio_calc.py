@@ -272,6 +272,62 @@ def _bounded_map(fn, items, limit=8, timeout=_FETCH_TICKER_TIMEOUT):
     return results
 
 
+# ================= watchlist symbol search =================
+# The price feed's own symbol search (same Yahoo family as the quote
+# fetches): a company name typed into Add ticker resolves here instead of
+# being upper-cased into a fake symbol.
+YAHOO_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
+YAHOO_SEARCH_TIMEOUT = 15
+
+
+def search_tickers(query, timeout=YAHOO_SEARCH_TIMEOUT, base_url=None,
+                   limit=6):
+    """Resolve a company name (or partial symbol) to tickers. Returns
+    ([(symbol, name, exchange)], error): error is "" on success — even
+    with zero matches, since unknown is not a transport failure. Never
+    raises: network trouble comes back as a plain error string so the UI
+    can tell offline apart from unknown."""
+    import json
+    import urllib.parse
+    import urllib.request
+    if not (query or "").strip():
+        return [], ""
+    url = "%s?q=%s&quotesCount=%d&newsCount=0" % (
+        base_url or YAHOO_SEARCH_URL,
+        urllib.parse.quote(query.strip()), limit)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0",
+                      "Accept": "application/json"})
+    try:
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        try:
+            payload = json.load(resp)
+        finally:
+            resp.close()
+    except Exception as e:  # noqa: BLE001 - failure text stays internal
+        # (the UI shows its own plain message); only empty-vs-set matters.
+        code = getattr(e, "code", None)
+        if code is not None:
+            return [], "search error %s" % code
+        return [], "search failed (%s)" % type(e).__name__
+    out = []
+    try:
+        quotes = (payload or {}).get("quotes") or []
+        for q in quotes:
+            sym = (q.get("symbol") or "").strip().upper()
+            if not sym:
+                continue
+            out.append((sym,
+                        (q.get("shortname") or q.get("longname") or ""
+                         ).strip(),
+                        (q.get("exchange") or "").strip()))
+            if len(out) >= limit:
+                break
+    except (AttributeError, TypeError):
+        return [], ""
+    return out, ""
+
+
 # ================= watchlist =================
 # Overview watchlist, directly below the drift chart (watchlist first, the
 # reserved events calendar goes below it when built). The standard list is
@@ -1547,13 +1603,22 @@ def fetch_rentcast_estimate(address, api_key, timeout=RENTCAST_TIMEOUT,
         out["error"] = ("No RentCast key — add your free Developer key in "
                         "Settings, then Refresh.")
         return out
+    # Never burn a call on a key that cannot be a key: an address-like
+    # stored value (typed into the wrong field before validation existed)
+    # is rejected by the server with 401 — flag it instead.
+    key = api_key.strip()
+    if "," in key or any(ch.isspace() for ch in key):
+        out["error"] = ("The saved RentCast key looks like a street "
+                        "address, not a key — fix it in Settings "
+                        "(Properties), then Refresh.")
+        return out
     if not (address or "").strip():
         out["error"] = "Add a property address in Settings first."
         return out
     url = "%s?address=%s" % ((base_url or RENTCAST_AVM_URL),
                              urllib.parse.quote(address.strip()))
     req = urllib.request.Request(
-        url, headers={"X-Api-Key": api_key.strip(),
+        url, headers={"X-Api-Key": key,
                       "Accept": "application/json"})
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
@@ -1627,6 +1692,9 @@ PROFILE_DEFAULTS = {
     # persists here (gitignored), cleared by delete-all along with the rest
     # of the profile. Standard classes live in WATCHLIST_CLASSES in code.
     "watchlist_classes": {},
+    # Resolved company names: {TICKER: name}, filled when a ticker is
+    # added via company-name search so the row can show "SQ — Block Inc.".
+    "watchlist_names": {},
     # RentCast API key (free Developer tier; user pastes it in Settings).
     # Stored here (gitignored, never in the repo), wiped by delete-all.
     "rentcast_key": "",

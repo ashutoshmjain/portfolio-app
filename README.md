@@ -29,6 +29,9 @@ Refresh home estimates, Log, Settings.
   Add ticker row (named for the class), per-ticker Remove buttons, its own
   Delete class (confirmed) and Copy buttons, plus an Add class row below;
   unknown symbols and offline/no-data failures report differently on Add;
+  Add accepts a company name too — it resolves via the price feed's symbol
+  search, shows the matches for picking, and the row keeps the resolved
+  name ("SQ — Block Inc.");
   columns Ticker | Price | Market cap ($T), prices updating only on Refresh
   stocks; the bottom area is reserved for the future upcoming-events
   calendar),
@@ -40,7 +43,9 @@ Refresh home estimates, Log, Settings.
   accounts; Avg purchase price and gains show ONLY when every open lot has
   cost — otherwise Avg reads `upload` with a missing-count tooltip and
   gains read `--`, per account in the ▶/▼ expansion too; home is one row
-  per property; a TOTAL row (total value + total gains, positions + home,
+  per property labeled RE 1, RE 2 (never the full address — the row's
+  numbers stay aligned; the legend below the table maps RE N to the
+  address); a TOTAL row (total value + total gains, positions + home,
   cash excluded; gains total shows only when every row is computable)
   closes the table and ties to Overview net worth; cash lives in
   Liquidity),
@@ -119,7 +124,10 @@ future upcoming-events calendar for portfolio holdings.)
   The drift chart labels every $500K with $100K minor gridlines (31 labels
   crowded the edge and stole a third of the plot).
 - Split-screen safe: every tab is verified at 960px window width — no
-  clipped text, no unreachable buttons, no horizontal overflow. Charts
+  clipped text, no unreachable buttons, no horizontal overflow. Every
+  edit-triggered rebuild preserves scroll position (snapshot fractions,
+  rebuild, restore on the new widgets) — no view jumps back to the top
+  after an add, remove, delete, or edit. Charts
   track the container width and shrink to fit; Overview and
   Diversification scroll vertically as one region each, so tall figures
   are never cropped by a short window (that clipping once ate x-labels,
@@ -332,7 +340,12 @@ the brokerage.
   what applies it; nothing is silently replaced. No key: Refresh shows a
   plain hint. Redfin/Zillow enter via the manual applied value (no
   scrapers). RentCast is called ONLY on explicit Refresh — 50 calls/month
-  free tier; remaining quota shows when the API reports it.
+  free tier; remaining quota shows when the API reports it. A stored key
+  that looks like an address (typed into the wrong field before validation
+  existed — the usual cause of a 401) is healed on load: moved to
+  Properties as the home address when none exists, else cleared, with a
+  status note; the fetcher itself never burns a call on an address-like
+  key.
 - **Log** (☰ menu): appends today's close to `drift_log.csv`
   (skips weekends, like the old daily cron). Upserts if run twice.
 - **Cost basis**: fill cost + acquired date per lot (Inputs grid or
