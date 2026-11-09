@@ -289,7 +289,8 @@ WATCHLIST_CLASSES = {
     # — BTC-USD quotes carry no market cap, so never show "--") plus the
     # Bitcoin proxy rows. Class total = the computed Bitcoin market cap.
     "Bitcoin": ["BTC", "MSTR", "IBIT", "ARKB"],
-    # GLD (price; market cap = the ETF's net assets, the existing fallback).
+    # GLD (price; market cap = the ETF's net assets — the same fallback
+    # every fund without a market cap gets).
     # Class total is COMPUTED: above-ground gold stock x live gold price
     # (live gold price = GLD price x 10) — a different number from GLD's
     # net assets; show both, never conflate them.
@@ -386,7 +387,8 @@ def load_watchlist_cache(path):
 def fetch_watchlist(tickers, cache_path):
     """Quotes + market caps for the Overview watchlist. Same cache file, a
     separate section; failures fall back to cached quotes and never crash.
-    GLD falls back to total net assets when marketCap is absent. Returns
+    Any fund without marketCap (GLD, IBIT, ARKB, VTI, user-class ETFs)
+    falls back to total net assets. Returns
     (quotes, errors, live): live = tickers with a fresh quote this run
     (Add uses it to reject unknown symbols)."""
     cached = load_watchlist_cache(cache_path)
@@ -416,12 +418,17 @@ def fetch_watchlist(tickers, cache_path):
                             price = float(h["Close"].iloc[-1])
                     except Exception:  # noqa: BLE001
                         pass
-                if mcap is None and t == "GLD":
+                # Net-assets fallback for every fund without a market
+                # cap (GLD, IBIT, ARKB, VTI, any ETF in a user class):
+                # price feeds carry no marketCap for funds, so totalAssets
+                # (else netAssets) stands in. BTC is excluded — its cap is
+                # computed from mined supply, never "--" when priced.
+                if mcap is None and t != "BTC":
                     try:
                         info = tk.info
                         mcap = info.get("totalAssets") or \
                             info.get("netAssets")
-                    except Exception:  # noqa: BLE001 - ETF info is flaky
+                    except Exception:  # noqa: BLE001 - fund info is flaky
                         pass
                 if price is not None:
                     price = round(float(price), 2)
@@ -717,20 +724,42 @@ def compute(positions, prices, home_value, cost_basis=None, accounts=None):
 
 
 # ================= drift log =================
+def _valid_drift_date(raw):
+    """ISO date that is parseable and plausible (2000-01-01..today).
+    A malformed or implausible date (e.g. epoch 1969 from bad clone data)
+    silently stretches the chart axis and flattens the real series — or
+    raises downstream and kills the tab build. No code path writes such
+    dates, so the load is defensive: bad rows are skipped, never crashed
+    on. Returns the stripped string, or None."""
+    if not raw:
+        return None
+    try:
+        day = datetime.date.fromisoformat(str(raw).strip())
+    except ValueError:
+        return None
+    if day < datetime.date(2000, 1, 1) or \
+            day > datetime.date.today():
+        return None
+    return day.isoformat()
+
+
 def load_drift_log(path):
     rows = []
     if os.path.exists(path):
         with open(path, newline="") as f:
             for row in csv.DictReader(f):
                 try:
+                    day = _valid_drift_date(row.get("date"))
+                    if day is None:
+                        continue
                     rows.append({
-                        "date": row["date"],
+                        "date": day,
                         "liquid": float(row["liquid"]),
                         "home": float(row["home"]),
                         "actual_total": float(row["actual_total"]),
                         "standard_total": float(row["standard_total"]),
                     })
-                except (KeyError, ValueError):
+                except (KeyError, ValueError, AttributeError):
                     continue
     rows.sort(key=lambda r: r["date"])
     return rows

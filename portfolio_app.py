@@ -14,6 +14,7 @@ NEVER executes trades. Display only.
 import csv
 import datetime
 import gc
+import json
 import os
 import queue
 import threading
@@ -155,6 +156,125 @@ def pct(x):
     return pc.fmt_pct(x)
 
 
+class SelectableMsg:
+    """Message widget with real mouse selection — a drop-in for the message
+    CTkLabels it replaces (.configure(text=...)/.pack/.grid/.winfo_exists
+    compatible, plus .cget("text")).
+
+    The standing copy rule covers every user-facing message: plain labels
+    only copy via click+Ctrl+C, so dialog/popup/status messages use this
+    borderless read-only text instead — drag to select, Ctrl+C to copy.
+    Typing/paste/cut are blocked; navigation, selection and Control
+    shortcuts stay live. A textvariable (status bar) is mirrored live.
+    """
+
+    def __init__(self, parent, text="", text_color=None, wraplength=None,
+                 font=None, textvariable=None, wrap="word"):
+        fg = {"orange": "orange", "red": "red"}.get(
+            text_color, "#EDEDED" if text_color is None else text_color)
+        tkfont = None
+        if font is not None:
+            try:
+                tkfont = (font.cget("family"), font.cget("size"),
+                          font.cget("weight"))
+            except (tk.TclError, AttributeError, TypeError):
+                tkfont = None
+        self._box = tk.Text(parent, wrap=wrap, width=20, height=1,
+                            relief="flat", borderwidth=0,
+                            highlightthickness=0, bg="#2B2B2B", fg=fg,
+                            cursor="xterm", font=tkfont or ("Roboto", -16),
+                            spacing1=2, spacing3=4,
+                            insertbackground="#EDEDED")
+        self._text = ""
+        self._var = textvariable
+        if textvariable is not None:
+            try:
+                self._text = textvariable.get()
+            except tk.TclError:
+                pass
+        if text:
+            self._text = text
+        if self._text:
+            self._box.insert("1.0", self._text)
+        self._fit_later()
+
+        def _ro_key(e):
+            if e.state & 0x4:  # Control held: copy, select-all, etc.
+                return None
+            if e.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
+                            "Prior", "Next"):
+                return None
+            return "break"
+
+        self._box.bind("<KeyPress>", _ro_key, add="+")
+        for _seq in ("<<Cut>>", "<<Paste>>"):
+            self._box.bind(_seq, lambda e: "break", add="+")
+        self._box.bind("<Configure>", lambda e: self._fit(), add="+")
+        if textvariable is not None:
+            try:
+                textvariable.trace_add(
+                    "write", lambda *a: self.set(textvariable.get()))
+            except tk.TclError:
+                pass
+
+    def set(self, text):
+        try:
+            self._box.delete("1.0", "end")
+            if text:
+                self._box.insert("1.0", text)
+            self._text = text or ""
+            self._fit()
+        except tk.TclError:
+            pass
+
+    def _fit(self):
+        try:
+            self._box.update_idletasks()
+            if str(self._box.cget("wrap")) == "none":
+                return
+            n = self._box.count("1.0", "end", "displaylines")
+            h = max(1, (n[0] if n else 1))
+            if int(self._box.cget("height")) != h:
+                self._box.configure(height=h)
+        except tk.TclError:
+            pass
+
+    def _fit_later(self):
+        try:
+            self._box.after_idle(self._fit)
+        except tk.TclError:
+            pass
+
+    def configure(self, cnf=None, **kw):
+        if "text" in kw:
+            self.set(kw.pop("text"))
+        if "text_color" in kw:
+            colour = kw.pop("text_color")
+            kw["fg"] = {"orange": "orange", "red": "red"}.get(
+                colour, "#EDEDED" if colour is None else colour)
+        if not kw and cnf is None:
+            return
+        try:
+            self._box.configure(cnf, **kw) if cnf else \
+                self._box.configure(**kw)
+        except tk.TclError:
+            pass
+
+    config = configure
+
+    def cget(self, key):
+        if key == "text":
+            return self._text
+        try:
+            return self._box.cget(key)
+        except tk.TclError:
+            return None
+
+    def __getattr__(self, name):
+        # pack/grid/place/bind/winfo_exists/destroy/focus live on the box.
+        return getattr(self.__dict__["_box"], name)
+
+
 class Table(ctk.CTkFrame):
     """Simple grid table: header row bold, values as labels.
 
@@ -248,8 +368,9 @@ class App(ctk.CTk):
         self.date_lbl.pack(side="left", padx=8)
         ctk.CTkButton(top, text="☰", width=44,
                       command=self.toggle_menu).pack(side="right", padx=4)
-        self.status = ctk.CTkLabel(top, textvariable=self.status_var,
-                                   text_color="orange")
+        # Selectable so every status line copies — same rule as dialogs.
+        self.status = SelectableMsg(top, textvariable=self.status_var,
+                                    text_color="orange", wrap="none")
         self.status.pack(side="left", padx=8)
         self.menu_win = None
         self.bind_all("<MouseWheel>", self._wheel_scroll, add="+")
@@ -388,6 +509,46 @@ class App(ctk.CTk):
         self.profile["watchlist_classes"] = classes
         self.profile["watchlist_custom"] = []
         pc.save_profile(PROFILE_JSON, self.profile)
+
+    def _check_settings_data(self, data):
+        """Validate an imported settings file. Returns an error string, or
+        None when the file is safe to apply. Unknown keys are ignored
+        (forward compatibility); structural and numeric fields are checked
+        so a bad file applies nothing — never a partial apply."""
+        if not isinstance(data, dict):
+            return "Not a settings file (a JSON object is expected)"
+        for key in ("properties", "watchlist_custom"):
+            if key in data and not isinstance(data[key], list):
+                return "'%s' must be a list" % key
+        if "watchlist_classes" in data and \
+                not isinstance(data["watchlist_classes"], dict):
+            return "'watchlist_classes' must be an object"
+        if "rentcast_key" in data and \
+                not isinstance(data["rentcast_key"], str):
+            return "'rentcast_key' must be text"
+        for key in ("ss_owner_monthly", "ss_spouse_monthly",
+                    "spending_before65_annual",
+                    "spending_after65_base_annual",
+                    "other_realized_gains_current_year"):
+            if key in data:
+                try:
+                    float(data[key] or 0)
+                except (TypeError, ValueError):
+                    return "'%s' must be a number" % key
+        if "annual_net_gains_cap" in data and \
+                data["annual_net_gains_cap"] not in (None, ""):
+            try:
+                if float(data["annual_net_gains_cap"]) < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return "'annual_net_gains_cap' must be blank or a number"
+        if "home_purchase_price" in data and data["home_purchase_price"] \
+                not in (None, ""):
+            try:
+                float(data["home_purchase_price"])
+            except (TypeError, ValueError):
+                return "'home_purchase_price' must be blank or a number"
+        return None
 
     def watch_classes(self):
         """Ordered [(class name, [tickers])]: the fixed standard classes
@@ -627,18 +788,16 @@ class App(ctk.CTk):
             use_btn = ctk.CTkButton(line, text="Use estimate", width=110,
                                     state="disabled")
             use_btn.pack(side="left", padx=4)
-            pulled = ctk.CTkLabel(box, text="Fetching…", anchor="w",
-                                  text_color=CLR_SECONDARY,
-                                  wraplength=380)
+            pulled = SelectableMsg(box, text="Fetching…",
+                                     text_color=CLR_SECONDARY)
             pulled.pack(anchor="w")
             rows.append({"prop": p, "applied": applied,
                          "use_btn": use_btn, "pulled": pulled,
                          "result": None})
-        quota_lbl = ctk.CTkLabel(win, text="", anchor="w",
-                                 text_color=CLR_SECONDARY, wraplength=380)
+        quota_lbl = SelectableMsg(win, text="",
+                                    text_color=CLR_SECONDARY)
         quota_lbl.pack(padx=12, anchor="w")
-        msg = ctk.CTkLabel(win, text="", text_color="orange",
-                           wraplength=380, anchor="w")
+        msg = SelectableMsg(win, text="", text_color="orange")
         msg.pack(padx=12, anchor="w")
 
         def finish(result_list):
@@ -679,6 +838,13 @@ class App(ctk.CTk):
                     r["pulled"].configure(
                         text="No RentCast key — add your free Developer key "
                              "in Settings, then Refresh.")
+            # The no-key state offers a direct path: no closing the popup,
+            # opening the menu, and opening Settings by hand.
+            ctk.CTkButton(win, text="Open Settings", width=150,
+                          command=lambda: (win.destroy(),
+                                           self.open_settings())).pack(
+                                               padx=12, pady=(6, 2),
+                                               anchor="w")
         else:
             snapshots = [(p.get("address") or "") for p in props]
             box_q = queue.Queue()
@@ -1091,7 +1257,10 @@ class App(ctk.CTk):
                             % (money(cap - realized), money(cap),
                                " (%s)" % cap_note if cap_note else ""))
         alerts = [
-            "Drift vs standard: actual %s vs standard %s (%s)." % (
+            # No wrapping parens around the drift figure: the shared
+            # formatters already parenthesize negatives, so "(%s)" would
+            # render "((2.9%))" on a losing year.
+            "Drift vs standard: actual %s vs standard %s; drift %s." % (
                 pct(d["actual_ytd"]), pct(d["standard_ytd"]),
                 pct(d["drift_pp"])),
             leeway_alert,
@@ -1167,15 +1336,7 @@ class App(ctk.CTk):
                          padx=10, pady=(10, 2), anchor="w")
         for name, tickers in self.watch_classes():
             standard = name in pc.WATCHLIST_CLASSES
-            ctk.CTkLabel(
-                body, text=self._watch_class_title(name, tickers),
-                font=ctk.CTkFont(size=FS_BODY, weight="bold")).pack(
-                    padx=10, pady=(6, 0), anchor="w")
-            Table(body, ["Ticker", "Price", "Market cap ($T)"],
-                  [self._watch_row(t) for t in tickers]
-                  ).pack(fill="x", padx=10, pady=4)
-            if not standard:
-                self._watch_class_controls(body, name, tickers)
+            self._watch_class_section(body, name, tickers, standard)
         # New user-defined class: an asset class is a named watchlist.
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(6, 2))
@@ -1184,38 +1345,73 @@ class App(ctk.CTk):
         cls_var = tk.StringVar()
         ctk.CTkEntry(row, width=140, textvariable=cls_var).pack(
             side="left", padx=4)
-        cmsg = ctk.CTkLabel(row, text="", text_color="orange")
+        cmsg = SelectableMsg(row, text="", text_color="orange")
         cmsg.pack(side="left", padx=4)
         ctk.CTkButton(row, text="Add class", width=100,
                       command=lambda: self._watch_new_class(
                           cls_var.get(), cmsg)).pack(side="left", padx=4)
 
-    def _watch_class_controls(self, body, name, tickers):
+    def _watch_class_section(self, body, name, tickers, standard):
+        # Every class owns its controls. Standard classes (fixed content
+        # in code) show no edit controls at all — a "standard" note only.
+        # A user class carries its Add ticker row, per-ticker Remove
+        # buttons, and its own Delete class button in the section header;
+        # no add/remove path targets the standard classes.
+        head = ctk.CTkFrame(body, fg_color="transparent")
+        head.pack(fill="x", padx=10, pady=(6, 0))
+        ctk.CTkLabel(head, text=self._watch_class_title(name, tickers),
+                     font=ctk.CTkFont(size=FS_BODY,
+                                      weight="bold")).pack(side="left")
+        if standard:
+            ctk.CTkLabel(head, text="standard",
+                         text_color=CLR_SECONDARY).pack(side="left", padx=8)
+            Table(body, ["Ticker", "Price", "Market cap ($T)"],
+                  [self._watch_row(t) for t in tickers]
+                  ).pack(fill="x", padx=10, pady=4)
+            return
+        ctk.CTkButton(head, text="Delete class", width=110,
+                      command=lambda: self._watch_delete_class(
+                          name)).pack(side="right", padx=4)
+        ctk.CTkButton(head, text="Copy", width=80,
+                      command=lambda: self._copy_watch_class(
+                          name, tickers)).pack(side="right", padx=4)
+        for t in tickers:
+            self._watch_ticker_row(body, name, t)
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=2)
-        ctk.CTkLabel(row, text="Add ticker:").pack(side="left", padx=4)
+        ctk.CTkLabel(row, text="Add ticker to %s:" % name).pack(
+            side="left", padx=4)
         add_var = tk.StringVar()
         ctk.CTkEntry(row, width=100, textvariable=add_var).pack(
             side="left", padx=4)
-        wmsg = ctk.CTkLabel(row, text="", text_color="orange")
+        wmsg = SelectableMsg(row, text="", text_color="orange")
         wmsg.pack(side="left", padx=4)
         ctk.CTkButton(row, text="Add", width=70,
                       command=lambda: self._watch_add(
                           name, add_var.get(), wmsg)).pack(side="left",
                                                            padx=4)
-        if tickers:
-            rrow = ctk.CTkFrame(body, fg_color="transparent")
-            rrow.pack(fill="x", padx=10, pady=2)
-            rem_var = tk.StringVar(value=tickers[0])
-            ctk.CTkOptionMenu(rrow, values=tickers, variable=rem_var,
-                              width=110).pack(side="left", padx=4)
-            ctk.CTkButton(rrow, text="Remove", width=90,
-                          command=lambda: self._watch_remove(
-                              name, rem_var.get(),
-                              wmsg)).pack(side="left", padx=4)
-            ctk.CTkButton(rrow, text="Delete class", width=110,
-                          command=lambda: self._watch_delete_class(
-                              name)).pack(side="left", padx=4)
+
+    def _watch_ticker_row(self, body, classname, t):
+        vals = self._watch_row(t)
+        row = ctk.CTkFrame(body)
+        row.pack(fill="x", padx=10, pady=1)
+        for col, (txt, w) in enumerate(
+                [(vals[0], 90), (vals[1], 110), (vals[2], 130)]):
+            neg = pc.is_negative_figure(txt)
+            ctk.CTkLabel(row, text=txt, width=w, anchor="w",
+                         text_color="red" if neg else None).grid(
+                             row=0, column=col, padx=4, sticky="w")
+        ctk.CTkButton(row, text="Remove", width=90,
+                      command=lambda: self._watch_remove(
+                          classname, t)).grid(row=0, column=3, padx=4)
+
+    def _copy_watch_class(self, name, tickers):
+        lines = ["\t".join(["Ticker", "Price", "Market cap ($T)"])]
+        for t in tickers:
+            lines.append("\t".join(self._watch_row(t)))
+        self._to_clipboard("\n".join(lines),
+                           "Watchlist class %s copied — paste anywhere."
+                           % name)
 
     def _watch_user_classes(self):
         return dict(self.profile.get("watchlist_classes") or {})
@@ -1223,6 +1419,15 @@ class App(ctk.CTk):
     def _watch_save_classes(self, classes):
         self.profile["watchlist_classes"] = classes
         pc.save_profile(PROFILE_JSON, self.profile)
+
+    # Markers of a transport/cache failure (as opposed to an unknown
+    # symbol): a valid symbol with no network or no cached data must not
+    # be rejected as "unknown". The generic "no quote (offline and
+    # uncached)" line is deliberately NOT a marker — it fires for unknown
+    # symbols too; only real exception names count.
+    _NET_MARKERS = ("urlerror", "connection", "timeout", "timed out",
+                    "resolve", "ssl", "http error", "network", "retries",
+                    "unreachable", "failed to", "eof", "remote end")
 
     def _watch_add(self, classname, sym_raw, msg):
         sym = (sym_raw or "").strip().upper()
@@ -1238,12 +1443,19 @@ class App(ctk.CTk):
             return
         msg.configure(text="Fetching %s…" % sym)
         try:
-            quotes, _err, live = pc.fetch_watchlist([sym], CACHE)
+            quotes, errs, live = pc.fetch_watchlist([sym], CACHE)
         except Exception:  # noqa: BLE001 - never crash on quotes
-            live, quotes = set(), {}
+            live, quotes, errs = set(), {}, ["fetch failed"]
         if sym not in live or not quotes.get(sym, {}).get("price"):
-            msg.configure(text="Could not find ticker %s — check the "
-                               "symbol." % sym)
+            blob = " ".join(errs or []).lower()
+            if any(m in blob for m in self._NET_MARKERS):
+                msg.configure(
+                    text="Could not fetch %s right now (no network or no "
+                         "saved data) — not added, but the symbol may be "
+                         "valid. Try again after Refresh stocks." % sym)
+            else:
+                msg.configure(text="Could not find ticker %s — check the "
+                                   "symbol." % sym)
             return
         classes[classname] = classes[classname] + [sym]
         self._watch_save_classes(classes)
@@ -1251,7 +1463,7 @@ class App(ctk.CTk):
         self.build_overview()
         self.status_var.set("Added %s to %s." % (sym, classname))
 
-    def _watch_remove(self, classname, sym, msg):
+    def _watch_remove(self, classname, sym):
         classes = self._watch_user_classes()
         members = classes.get(classname, [])
         if sym in members:
@@ -1260,7 +1472,7 @@ class App(ctk.CTk):
             self.build_overview()
             self.status_var.set("Removed %s from %s." % (sym, classname))
         else:
-            msg.configure(text="%s is not in your watchlist." % sym)
+            self.status_var.set("%s is not in your watchlist." % sym)
 
     def _watch_new_class(self, name_raw, msg):
         name = (name_raw or "").strip()
@@ -1281,6 +1493,14 @@ class App(ctk.CTk):
     def _watch_delete_class(self, name):
         classes = self._watch_user_classes()
         if name in pc.WATCHLIST_CLASSES or name not in classes:
+            return
+        # No undo exists, so the confirm is the safety net (same as
+        # delete-lot and delete-all).
+        if not self._confirm(
+                "Delete class",
+                "Delete watchlist class '%s' and its %s? There is no "
+                "undo." % (name, _n(len(classes[name]), "ticker")),
+                ok_text="Delete class"):
             return
         del classes[name]
         self._watch_save_classes(classes)
@@ -1330,6 +1550,31 @@ class App(ctk.CTk):
                              row=0, column=col, padx=2, sticky="w")
         for r in rows:
             self._hold_row(scroll, r)
+        # Totals row: total value + total gains, labeled with what it
+        # includes (positions + home rows; cash excluded — cash lives in
+        # Accounts / Liquidity, never in Holdings). Gains total shows only
+        # when every row's gain is computable, never a partial sum.
+        tot_gain = sum(r["gain"] for r in rows if r["gain"] is not None)
+        gain_unknown = any(r["gain"] is None for r in rows)
+        tot = ctk.CTkFrame(scroll)
+        tot.pack(fill="x", padx=4, pady=(4, 1))
+        tline = ctk.CTkFrame(tot, fg_color="transparent")
+        tline.pack(fill="x")
+        ctk.CTkLabel(tline, text="", width=30).grid(row=0, column=0,
+                                                   padx=2)
+        tcells = [("TOTAL (positions + home; cash excluded)", 150),
+                  ("", 90), ("", 170), ("", 90),
+                  (money(_total), 100),
+                  (("--" if gain_unknown else money(tot_gain)), 90),
+                  ("", 80)]
+        for col, (txt, w) in enumerate(tcells):
+            ctk.CTkLabel(
+                tline, text=txt, width=w, anchor="w",
+                wraplength=w if col == 0 else 0,
+                font=ctk.CTkFont(weight="bold"),
+                text_color="red" if col == 5 and not gain_unknown
+                and tot_gain < 0 else None).grid(row=0, column=col + 1,
+                                                padx=2, sticky="w")
         ctk.CTkButton(f, text="Copy table", width=110,
                       command=lambda: self._copy_holdings(rows)
                       ).pack(padx=6, pady=(6, 0), anchor="w")
@@ -1357,6 +1602,13 @@ class App(ctk.CTk):
                 "--" if r["gain"] is None else money(r["gain"]),
                 "--" if r["gain_pct"] is None else "%.1f%%" % (
                     r["gain_pct"] * 100)]))
+        tot_gain = sum(r["gain"] for r in rows if r["gain"] is not None)
+        gain_unknown = any(r["gain"] is None for r in rows)
+        lines.append("\t".join([
+            "TOTAL (positions + home; cash excluded)", "", "", "",
+            money(sum(r["value"] for r in rows
+                      if r["value"] is not None)),
+            "--" if gain_unknown else money(tot_gain), ""]))
         self._to_clipboard("\n".join(lines), "Holdings table copied — paste "
                                              "anywhere.")
 
@@ -1574,23 +1826,34 @@ class App(ctk.CTk):
         under = sum(b["under65"] for b in banks.values())
         over = sum(b["over65"] for b in banks.values())
         liquid = under + over
+        # Totals as a table row in the same columns — not just note text.
+        tot = ctk.CTkFrame(scroll)
+        tot.pack(fill="x", padx=4, pady=3)
+        tline = ctk.CTkFrame(tot, fg_color="transparent")
+        tline.pack(fill="x")
+        ctk.CTkLabel(tline, text="", width=30).grid(row=0, column=0,
+                                                   padx=2)
+        for col, txt in enumerate(
+                ["TOTAL (all institutions)", money(under), money(over),
+                 money(liquid)]):
+            ctk.CTkLabel(tline, text=txt, width=[170, 130, 150, 130][col],
+                         anchor="w", wraplength=[170, 130, 150, 130][col],
+                         font=ctk.CTkFont(weight="bold")).grid(
+                             row=0, column=col + 1, padx=2, sticky="w")
         sp = pc.spending_capacity(self.profile)
         years = (under / sp["before65"]) if sp["before65"] else None
         self._selectable_note(
-            f, "Totals: available now %s · unlocks at 59½ %s · liquid "
-               "%s · home %s · net worth %s. Available-now total ÷ "
+            f, "Home %s · net worth %s. Available-now total ÷ "
                "%s/yr before-65 spending = %s years of pre-65 spending "
                "covered by available-now money."
-               % (money(under), money(over), money(liquid),
-                  money(self.home_value), money(self.data["tnw"]),
+               % (money(self.home_value), money(self.data["tnw"]),
                   money(sp["before65"]),
                   "--" if years is None else "%.1f" % years),
             padx=6, pady=6, fill="x")
         self._selectable_note(
             f, "59½ (%s): penalty-free ≠ tax-free — Traditional "
                "withdrawals are still taxed as income; Roth earnings "
-               "also need the 5-year rule (Roth balance here is "
-               "negligible)."
+               "also need the 5-year rule."
                % pc.fifty_nine_half(self.profile.get("date_of_birth")),
             padx=6, pady=(0, 6), fill="x")
 
@@ -1686,6 +1949,24 @@ class App(ctk.CTk):
                          pct(r["actual_pct"]),
                          pc.fmt_pp(r["deviation_pp"]),
                          money(r["rebalance"])])
+        # Totals row: Target $ / Actual $ both sum to net worth — the
+        # cross-view tie. Deviation and Rebalance are per-bucket moves,
+        # not summable, so they stay blank.
+        tnw3 = self.data["tnw"]
+        if tnw3:
+            apct = sum(r["actual_pct"] for r in self.data["view3"]
+                       if r["actual_pct"] is not None)
+            apct_txt = "**" + pct(apct)
+        else:
+            apct_txt = "**--"
+        rows.append(["**TOTAL",
+                     "**" + pct(sum(r["target_pct"]
+                                    for r in self.data["view3"])),
+                     "**" + money(sum(r["target_dollar"]
+                                      for r in self.data["view3"])),
+                     "**" + money(sum(r["actual"]
+                                      for r in self.data["view3"])),
+                     apct_txt, "", ""])
         Table(body, ["Bucket", "Target %", "Target $", "Actual $",
                      "Actual %", "Deviation (pp)",
                      "Rebalance (buy / sell)"],
@@ -1696,7 +1977,7 @@ class App(ctk.CTk):
         self._selectable_note(
             body, "REBALANCE PLAN (display only, NEVER executes "
                   "trades). All 4 trades inside Schwab Ashu IRA: no tax "
-                  "(IRA), Medi-Cal safe. Verify at your brokerage before "
+                  "(IRA). Verify at your brokerage before "
                   "placing any trade.",
             padx=6, pady=6, fill="x")
         rows = []
@@ -1729,7 +2010,7 @@ class App(ctk.CTk):
         d = self.data["drift"]
         drift_txt = (
             "Drift (calendar-year baseline $4,526K = liquid $3,595K + home "
-            "$931K): actual YTD %s | standard YTD %s | drift %s (%s) | "
+            "$931K): actual YTD %s | standard YTD %s | drift %s, %s | "
             "standard total %s"
             % (pct(d["actual_ytd"]), pct(d["standard_ytd"]),
                pct(d["drift_pp"]), money(d["drift_dollar"]),
@@ -1751,6 +2032,9 @@ class App(ctk.CTk):
         prices = self.prices
         rows = []
         losers = []
+        # Totals accumulate here (raw numbers — the rows hold formatted
+        # strings). A column with any unknown shows "--", never a partial.
+        vsum, vunknown, psum, punknown = 0.0, False, 0.0, False
         for lot in pc.open_lots(self.lots):
             if pc.is_cash_row(lot):
                 continue
@@ -1760,6 +2044,14 @@ class App(ctk.CTk):
                 pnl = (lot["shares"] or 0) * (price - lot["cost"])
             else:
                 pnl = None
+            if value is None:
+                vunknown = True
+            else:
+                vsum += value
+            if pnl is None:
+                punknown = True
+            else:
+                psum += pnl
             term = pc.holding_term(lot.get("acquired"))
             if pnl is not None and pnl < 0:
                 losers.append((pnl, len(rows)))
@@ -1775,6 +2067,11 @@ class App(ctk.CTk):
         losers.sort()
         for rank, (_, i) in enumerate(losers, start=1):
             rows[i][-1] = str(rank)
+        if rows:
+            rows.append(["**TOTAL", "", "", "", "",
+                         "**" + ("--" if vunknown else money(vsum)),
+                         "**" + ("--" if punknown else money(psum)),
+                         "", ""])
         Table(body, ["Asset", "Account", "Shares", "Cost/share $",
                      "Price now", "Value $", "Unrealized P&L $", "Term",
                      "Harvest rank"],
@@ -1903,15 +2200,14 @@ class App(ctk.CTk):
             ctk.CTkButton(top, text="Guided", width=100,
                           command=self._cov_guide_start).pack(side="right",
                                                              padx=4)
-        self.cov_progress = ctk.CTkLabel(
+        self.cov_progress = SelectableMsg(
             f, text="Positions %d of %d · Cost entered %d of %d · Dates "
                     "entered %d of %d" % (
                         t["holdings_ok"], t["holdings_n"], t["cost_ok"],
                         t["cost_n"], t["acq_ok"], t["acq_n"]),
             font=ctk.CTkFont(size=FS_BODY, weight="bold"))
         self.cov_progress.pack(anchor="w", padx=8)
-        self.cov_warn = ctk.CTkLabel(f, text="", text_color="orange",
-                                     wraplength=860, anchor="w")
+        self.cov_warn = SelectableMsg(f, text="", text_color="orange")
         self.cov_warn.pack(padx=8, anchor="w")
         if self.cov_guide:
             self._cov_guide_panel(f)
@@ -1928,7 +2224,8 @@ class App(ctk.CTk):
                    "checks everything and commits at once; Discard "
                    "changes throws away unsaved edits (saved data is "
                    "not affected).\n"
-                   "• Click any text and press Ctrl+C to copy it; every "
+                   "• Click any text and press Ctrl+C to copy it — or drag "
+                   "to select any message; every "
                    "table has a Copy table button.",
                 padx=8, pady=2, fill="x")
         if not self.cov_lots:
@@ -2794,8 +3091,8 @@ class App(ctk.CTk):
         win.transient(self)
         win.resizable(False, False)
         win.grab_set()
-        ctk.CTkLabel(win, text=text, wraplength=360, anchor="w").pack(
-            padx=16, pady=(14, 10), anchor="w")
+        SelectableMsg(win, text=text).pack(
+            padx=16, pady=(14, 10), anchor="w", fill="x")
         result = {"ok": False}
         bar = ctk.CTkFrame(win, fg_color="transparent")
         bar.pack(fill="x", padx=16, pady=(0, 14))
@@ -2937,8 +3234,7 @@ class App(ctk.CTk):
         shares_var = tk.StringVar()
         ctk.CTkEntry(body, width=260, textvariable=shares_var).pack(
             anchor="w", padx=4, pady=2)
-        msg = ctk.CTkLabel(body, text="", text_color="orange",
-                           wraplength=320)
+        msg = SelectableMsg(body, text="", text_color="orange")
         msg.pack(anchor="w", padx=4, pady=6)
 
         def sync_bank(*_a):
@@ -3326,8 +3622,9 @@ class App(ctk.CTk):
         # row fits a 960px split-screen window. Reset the menu label after
         # each pick.
         try:
+            # No Import broker CSV: it duplicated Upload (both accept only
+            # template-shaped files) — the template is the one way in.
             {"Paste rows": self.paste_rows,
-             "Import broker CSV": self.import_broker_csv,
              "Copy AI prompt": self.copy_ai_prompt}[choice]()
         finally:
             try:
@@ -3339,8 +3636,9 @@ class App(ctk.CTk):
         f = self._clear_data_tab("Template")
         self._selectable_note(
             f, "Two ways to fill the template\n"
-               "1. Yourself — download the full template (or one account's "
-               "template from Inputs), fill one row per lot, upload it here.\n"
+               "1. Yourself — press Download Template (or one account's "
+               "download from Inputs), fill one row per lot, then press "
+               "Upload.\n"
                "2. With AI — paste broker screenshots into ChatGPT, Muse, "
                "Gemini or any AI together with the Copy-AI-prompt text, "
                "then upload the CSV it returns.\n"
@@ -3365,7 +3663,7 @@ class App(ctk.CTk):
         ctk.CTkButton(bar, text="Backup",
                       command=self.backup_now).pack(side="left", padx=4)
         self.template_more_menu = ctk.CTkOptionMenu(
-            bar, values=["Paste rows", "Import broker CSV", "Copy AI prompt"],
+            bar, values=["Paste rows", "Copy AI prompt"],
             command=self._template_more, width=110)
         self.template_more_menu.set("More ▾")
         self.template_more_menu.pack(side="left", padx=4)
@@ -3390,8 +3688,7 @@ class App(ctk.CTk):
         ctk.CTkButton(stamp_row, text="Change backup folder", width=160,
                       command=self.change_backup_folder).pack(side="left",
                                                               padx=8)
-        self.template_msg = ctk.CTkLabel(f, text="", wraplength=860,
-                                         anchor="w")
+        self.template_msg = SelectableMsg(f, text="")
         self.template_msg.pack(padx=8, pady=4, anchor="w")
         ctk.CTkLabel(f, text="Where to find each field at your broker:",
                      font=ctk.CTkFont(weight="bold")).pack(padx=8, pady=(8, 2),
@@ -3407,8 +3704,8 @@ class App(ctk.CTk):
             lines.append("  Example: %s" % g["example"])
             lines.append("")
         lines.append(
-            "Which file to export for Import broker CSV "
-            "(read this before exporting):")
+            "Which broker export to start from (read this before "
+            "exporting):")
         lines.append(
             "  Schwab — open lots: Positions → Cost Basis $ / Lot Details "
             "→ export. Sold lots: Realized Gain/Loss → Export Lot Details.")
@@ -3416,15 +3713,19 @@ class App(ctk.CTk):
             "  Vanguard — Cost basis → Unrealized / Realized → Show lot "
             "details → Export (top-right of the table).")
         lines.append(
-            "  What Import accepts: ONLY a file shaped like the template "
-            "(this exact header row: "
+            "  The template is the one way in: Upload accepts ONLY a file "
+            "shaped like the template (this exact header row: "
             "bank,account,account_type,asset,shares,cost_per_share,"
             "acquired_date,sold_date,sale_price_per_share). A raw "
             "Schwab/Vanguard export has different columns, so reshape it "
-            "to the template first — by hand, via the Copy AI prompt, or "
-            "via Paste rows — then Import (or Upload) it. Anything else "
-            "gets the plain not-recognized message pointing back at the "
-            "template; nothing is ever guessed, nothing changed.")
+            "to the template first — by hand or with the Copy AI prompt — "
+            "then Upload it. With thousands of institutions, each with its "
+            "own format, no auto-mapping is built; nothing is ever "
+            "guessed.")
+        lines.append(
+            "  Combine ALL accounts into ONE template file and run ONE "
+            "upload — uploads upsert by lot key, so one complete file "
+            "beats several partial ones.")
         lines.append(
             "  Caveats that are normal, not errors: Vanguard provides no "
             "cost basis for IRA accounts, so blank IRA cost is expected. "
@@ -3509,43 +3810,9 @@ class App(ctk.CTk):
         msg = self._ingest_rows(fixed, "clipboard")
         self.template_msg.configure(text=msg)
 
-    def import_broker_csv(self):
-        # Hint at the moment of importing (the dialog title): the full
-        # per-broker export steps live in the Template guidance section.
-        path = filedialog.askopenfilename(
-            title="Import broker CSV — template-shaped file only "
-                  "(see Template guidance for broker export steps)",
-            filetypes=[("CSV", "*.csv")])
-        if not path:
-            return
-        try:
-            with open(path, newline="") as fh:
-                sample = fh.read(65536)
-                fh.seek(0)
-                try:
-                    dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
-                except csv.Error:
-                    dialect = csv.excel
-                rows = list(csv.DictReader(fh, dialect=dialect))
-        except OSError as e:
-            self.template_msg.configure(text="Cannot read file: %s" % e)
-            return
-        if not rows:
-            self.template_msg.configure(text="No data rows in that file.")
-            return
-        have = {(k or "").strip().lower() for k in rows[0]}
-        if not set(pc.LOT_FIELDS) <= have:
-            self.template_msg.configure(
-                text="I don't recognize this export format (found columns: "
-                     "%s). The template is the canonical format — download "
-                     "it, or fill it via the AI prompt, or Paste rows. "
-                     "Nothing was guessed, nothing changed."
-                     % ", ".join(sorted(have)))
-            return
-        fixed = [{k.strip().lower(): v for k, v in r.items()} for r in rows]
-        msg = self._ingest_rows(fixed, path)
-        self.template_msg.configure(text=msg)
-
+    # import_broker_csv was deleted (Prompt 7): it duplicated Upload —
+    # both accepted only template-shaped files, so the menu item only
+    # confused. The template is the one way in (Upload).
     def _write_template_csv(self, path, lots):
         with open(path, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=pc.LOT_FIELDS)
@@ -3712,13 +3979,16 @@ class App(ctk.CTk):
         body.pack(fill="both", expand=True, padx=10, pady=(10, 4))
         foot = ctk.CTkFrame(win, fg_color="transparent")
         foot.pack(fill="x", side="bottom", padx=10, pady=(4, 10))
-        msg = ctk.CTkLabel(foot, text="", text_color="orange",
-                           wraplength=560, anchor="w")
+        msg = SelectableMsg(foot, text="", text_color="orange")
         msg.pack(anchor="w", padx=4, pady=(0, 4))
         entries = {}
         fields = [("date_of_birth", "Date of birth (YYYY-MM or YYYY-MM-DD)"),
                   ("ss_owner_monthly", "Owner Social Security $/mo"),
                   ("ss_spouse_monthly", "Spouse Social Security $/mo"),
+                  ("spending_before65_annual",
+                   "Allowed spending $/yr before 65"),
+                  ("spending_after65_base_annual",
+                   "Allowed spending $/yr after 65 (base, before Soc Sec)"),
                   ("other_realized_gains_current_year",
                    "Other realized gains this year $ (pre-app history)"),
                   ("other_realized_gains_note", "Source note for the above"),
@@ -3743,11 +4013,6 @@ class App(ctk.CTk):
         ctk.CTkLabel(body, text="Properties",
                      font=ctk.CTkFont(weight="bold")).pack(
                          anchor="w", padx=4, pady=(10, 0))
-        ctk.CTkLabel(body, text="RentCast API key (free Developer tier)").pack(
-            anchor="w", padx=4, pady=(6, 0))
-        key_ent = ctk.CTkEntry(body, width=380)
-        key_ent.insert(0, self.profile.get("rentcast_key") or "")
-        key_ent.pack(anchor="w", padx=4, pady=2)
         prop_box = ctk.CTkFrame(body, fg_color="transparent")
         prop_box.pack(fill="x", padx=4, pady=2)
         prop_rows = []
@@ -3788,11 +4053,21 @@ class App(ctk.CTk):
             prop_rows.append({"frame": frame, "addr": addr,
                              "applied": applied, "last": prop})
 
-        for _p in self._properties():
+        # One address row is always present: with zero saved properties
+        # the empty row keeps adding a property visible without scrolling,
+        # and blank-address rows never persist (skipped on save).
+        for _p in self._properties() or [None]:
             add_prop_row(_p)
-        ctk.CTkButton(body, text="Add property", width=130,
+        ctk.CTkButton(body, text="Add property", width=140,
                       command=lambda: add_prop_row()).pack(
                           anchor="w", padx=4, pady=4)
+        ctk.CTkLabel(
+            body,
+            text="RentCast API key (free Developer tier — key only, "
+                 "never an address)").pack(anchor="w", padx=4, pady=(6, 0))
+        key_ent = ctk.CTkEntry(body, width=380)
+        key_ent.insert(0, self.profile.get("rentcast_key") or "")
+        key_ent.pack(anchor="w", padx=4, pady=2)
         self._selectable_note(
             body, "Refresh home estimates (hamburger menu) pulls the "
                   "RentCast estimate per property and shows it next to "
@@ -3811,6 +4086,10 @@ class App(ctk.CTk):
                     entries["ss_owner_monthly"].get() or 0)
                 self.profile["ss_spouse_monthly"] = float(
                     entries["ss_spouse_monthly"].get() or 0)
+                self.profile["spending_before65_annual"] = float(
+                    entries["spending_before65_annual"].get() or 0)
+                self.profile["spending_after65_base_annual"] = float(
+                    entries["spending_after65_base_annual"].get() or 0)
                 self.profile["other_realized_gains_current_year"] = float(
                     entries["other_realized_gains_current_year"].get() or 0)
                 self.profile["other_realized_gains_note"] = \
@@ -3841,8 +4120,11 @@ class App(ctk.CTk):
                                                              ).replace("$",
                                                                        "")
                     applied = float(raw or 0)
+                    addr = r["addr"].get().strip()
+                    if not addr:
+                        continue  # default empty row never persists
                     last = dict(r["last"])
-                    last["address"] = r["addr"].get().strip()
+                    last["address"] = addr
                     last["applied_value"] = applied
                     new_props.append(last)
             except ValueError:
@@ -3850,7 +4132,16 @@ class App(ctk.CTk):
                                    "values must be numbers.")
                 return
             self.profile["properties"] = new_props
-            self.profile["rentcast_key"] = key_ent.get().strip()
+            key = key_ent.get().strip()
+            # An address-like value is flagged plainly, never silently
+            # stored as a key (API keys have no spaces or commas).
+            if key and ("," in key or any(ch.isspace() for ch in key)):
+                msg.configure(
+                    text="That looks like a street address, not a RentCast "
+                         "key — put the address in a Properties address "
+                         "field above. Nothing saved.")
+                return
+            self.profile["rentcast_key"] = key
             pc.save_profile(PROFILE_JSON, self.profile)
             self._sync_home()
             self.recompute()
@@ -3865,6 +4156,67 @@ class App(ctk.CTk):
                       command=save).pack(side="left", padx=4)
         ctk.CTkButton(foot, text="Cancel", width=110,
                       command=win.destroy).pack(side="left", padx=4)
+
+        def export_settings():
+            # Local-only file (like the backup): the profile.json format,
+            # round-trippable into another copy of the app. Never defaults
+            # into the repo folder.
+            stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+            path = filedialog.asksaveasfilename(
+                defaultextension=".json", filetypes=[("JSON", "*.json")],
+                initialdir=self._downloads_dir(),
+                initialfile="settings-%s.json" % stamp)
+            if not path:
+                return
+            try:
+                with open(path, "w") as fh:
+                    json.dump(self.profile, fh, indent=1, sort_keys=True)
+            except OSError as e:
+                msg.configure(text="Export failed: %s" % e)
+                return
+            self.status_var.set("Exported settings to %s." % path)
+
+        def import_settings():
+            path = filedialog.askopenfilename(
+                filetypes=[("JSON", "*.json")])
+            if not path:
+                return
+            try:
+                with open(path) as fh:
+                    data = json.load(fh)
+            except (ValueError, OSError) as e:
+                msg.configure(text="Not a settings file (%s) — nothing "
+                                   "applied." % type(e).__name__)
+                return
+            err = self._check_settings_data(data)
+            if err:
+                msg.configure(text="%s — nothing applied." % err)
+                return
+            if not self._confirm(
+                    "Import settings",
+                    "Replace ALL settings with '%s'? Portfolio lots and "
+                    "the drift log are not touched."
+                    % os.path.basename(path),
+                    ok_text="Import settings"):
+                return
+            cleaned = {k: data[k] for k in pc.PROFILE_DEFAULTS
+                       if k in data}
+            self.profile = dict(pc.PROFILE_DEFAULTS)
+            self.profile.update(cleaned)
+            pc.save_profile(PROFILE_JSON, self.profile)
+            self._sync_home()
+            self.recompute()
+            self.build_all()
+            self.refresh_data_window()
+            win.destroy()
+            self.status_var.set("Imported settings from %s." % path)
+
+        exp_bar = ctk.CTkFrame(foot, fg_color="transparent")
+        exp_bar.pack(fill="x", pady=(6, 0))
+        ctk.CTkButton(exp_bar, text="Export settings", width=150,
+                      command=export_settings).pack(side="left", padx=4)
+        ctk.CTkButton(exp_bar, text="Import settings", width=150,
+                      command=import_settings).pack(side="left", padx=4)
         win.after(50, lambda: (win.deiconify(), win.lift())
                   if win.winfo_exists() else None)
 
@@ -3920,8 +4272,7 @@ class App(ctk.CTk):
             fg_color="#8B0000", hover_color="#B00000",
             command=self.delete_all_data, state="disabled")
         self.danger_delete_btn.pack(side="left", padx=4)
-        self.danger_msg = ctk.CTkLabel(f, text="", wraplength=860,
-                                       anchor="w")
+        self.danger_msg = SelectableMsg(f, text="")
         self.danger_msg.pack(padx=8, pady=4, anchor="w")
 
     def _danger_arm(self, text):
@@ -3973,8 +4324,7 @@ class App(ctk.CTk):
         win.resizable(False, False)
         body = ctk.CTkFrame(win, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=12, pady=12)
-        msg = ctk.CTkLabel(body, text="", text_color="orange",
-                           wraplength=360, anchor="w")
+        msg = SelectableMsg(body, text="", text_color="orange")
         entries = {}
 
         def row(label, default="", width=260):

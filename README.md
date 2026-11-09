@@ -21,10 +21,17 @@ Refresh home estimates, Log, Settings.
   cap — never "--" when priced; supply accrues from a stored anchor at
   ~450 BTC/day), and Gold's class total is the COMPUTED above-ground stock
   × live gold price (GLD price × 10) — a different number from GLD's net
-  assets in its row; your classes persist in profile.json and clear on
-  delete-all while the standard classes always reappear; columns Ticker |
-  Price | Market cap ($T), prices updating only on Refresh stocks; the
-  bottom area is reserved for the future upcoming-events calendar),
+  assets in its row; fund caps without a market cap (IBIT, ARKB, VTI, any
+  user-class ETF) fall back to net assets, so no fund row reads "--" when
+  priced; your classes persist in profile.json and clear on delete-all
+  while the standard classes always reappear; standard classes show no
+  edit controls (a "standard" note only) while each user class owns its
+  Add ticker row (named for the class), per-ticker Remove buttons, its own
+  Delete class (confirmed) and Copy buttons, plus an Add class row below;
+  unknown symbols and offline/no-data failures report differently on Add;
+  columns Ticker | Price | Market cap ($T), prices updating only on Refresh
+  stocks; the bottom area is reserved for the future upcoming-events
+  calendar),
   **Accounts** (bank → account → position
   quantities, prices, values — data-driven from lots + the account
   registry, never a hardcoded list; rebuilds on every Save and refresh; $0
@@ -32,8 +39,11 @@ Refresh home estimates, Log, Settings.
   the window, one scroll region: one row per asset aggregated across
   accounts; Avg purchase price and gains show ONLY when every open lot has
   cost — otherwise Avg reads `upload` with a missing-count tooltip and
-  gains read `--`, per account in the ▶/▼ expansion too; home is one more
-  row; cash lives in Liquidity),
+  gains read `--`, per account in the ▶/▼ expansion too; home is one row
+  per property; a TOTAL row (total value + total gains, positions + home,
+  cash excluded; gains total shows only when every row is computable)
+  closes the table and ties to Overview net worth; cash lives in
+  Liquidity),
   **Liquidity** (the sheet's Liquidity Plan tab, framed by TRUE access age:
   ONE row per institution — Chase/chase unified case-insensitively — with
   Available now / Unlocks at 59½ (date from the Settings date of birth) /
@@ -44,6 +54,11 @@ Refresh home estimates, Log, Settings.
   spending/SS milestone on Overview only),
   **Tax implications** (per-type tax facts, not advice, + your
   account→type mapping).
+  Every view that lists money shows a total: Holdings and Diversification
+  bucket tables carry TOTAL rows tying to net worth, the Tax Harvest losers
+  table totals Value $ / Unrealized P&L $ (unknown columns read `--`, never
+  a partial sum), and Liquidity shows its totals as a table row instead of
+  note text (the note keeps only home, net worth, and years-of-spending).
 - **Empty state** — with ZERO positions, Overview shows no numbers, no
   chart, no alerts: only "No data yet — add your first bank / account, or
   upload a filled template" with those two actions as buttons. A fresh copy
@@ -75,6 +90,11 @@ future upcoming-events calendar for portfolio holdings.)
   copy; readout labels copy their text (the click focuses the label even
   when it lands on a wrapper); anything inside a table copies the
   whole table. The top bar confirms each copy.
+- Every dialog, popup, and status message is mouse-selectable too — drag
+  to select, Ctrl+C to copy: Refresh results, confirmations, Settings and
+  Template messages, watchlist messages, Inputs progress/warnings, the
+  status bar. No message in the app is copy-proof (native file dialogs
+  aside).
 - Overview has a **Copy summary** button (net worth, spending, alerts).
   Holdings, Liquidity, and the Inputs grid each have a **Copy table** /
   **Copy grid** button: TSV to the clipboard, pasting straight into Excel,
@@ -213,18 +233,17 @@ only navigation (the ☰ menu opens no window).
   accumulate; a synced Drive/OneDrive/Dropbox folder carries them to other
   machines, no cloud integration — plus a last-backup stamp and a
   Change-backup-folder button), and a **More ▾** menu holding the secondary
-  actions **Paste rows** (clipboard TSV/CSV), **Import broker CSV** (ONLY
-  template-shaped files import — a raw Schwab/Vanguard export has different
-  columns, so reshape it to the template first; anything else is plainly
-  rejected, never guessed; the Import dialog title points at the guidance),
-  and **Copy AI prompt** (ready-made screenshot-to-CSV prompt for any AI).
-  Download = save-dialog each time, anywhere; backup = remembered folder +
-  one click + stamp. The tab also carries a per-field broker guide (Schwab +
-  Vanguard paths, CSV-export pointers, 1099-B note) plus a "Which file to
-  export for Import broker CSV" block with the exact Schwab (Positions →
-  Cost Basis $ / Lot Details → export) and Vanguard (Cost basis →
-  Unrealized/Realized → Show lot details → Export, top-right) steps, the
-  template-shape rule the importer actually enforces, and the standing
+  actions **Paste rows** (clipboard TSV/CSV) and **Copy AI prompt**
+  (ready-made screenshot-to-CSV prompt for any AI) — no Import broker CSV:
+  it duplicated Upload (both accepted only template-shaped files), so it was
+  deleted and the template is the one way in. Download = save-dialog each
+  time, anywhere; backup = remembered folder + one click + stamp. The tab
+  also carries a per-field broker guide (Schwab + Vanguard paths,
+  CSV-export pointers, 1099-B note) plus a "Which broker export to start
+  from" block with the exact Schwab (Positions → Cost Basis $ / Lot Details
+  → export) and Vanguard (Cost basis → Unrealized/Realized → Show lot
+  details → Export, top-right) steps, the template-only rule, the
+  combine-ALL-accounts-into-one-file encouragement, and the standing
   caveats (Vanguard IRA blank cost is expected; 1099-B is the authority).
 - **True-up test** — verify a fresh copy of the app reproduces your data:
   Save, then Template → Download Data (note open/closed counts,
@@ -237,16 +256,25 @@ only navigation (the ☰ menu opens no window).
   not prices (the clone fetches its own) and not home value (set it
   identically in the clone).
 - **Settings** (☰ menu dialog, formerly the Profile sub-tab) — date of
-  birth, SS amounts, other gains + note, optional home purchase price,
+  birth, SS amounts, allowed spending $/yr before 65 and after-65 base
+  (enterable here — Overview, Liquidity and the live summary all update
+  from them), other gains + note, optional home purchase price,
   annual net-gains cap $/yr (blank = no cap enforced) + cap reason/note,
-  RentCast API key (free Developer tier, pasted in by the user) and the
-  Properties list (address + applied value + last estimate/source/date per
+  RentCast API key (free Developer tier, pasted in by the user — an
+  address-like value is refused, keys have no spaces or commas) and the
+  Properties list (one address row present by default; blank-address rows
+  never save; address + applied value + last estimate/source/date per
   property, Add/Remove; Redfin and Zillow enter through the manual applied
-  value — check in the browser, type the number; no scrapers)
+  value — check in the browser, type the number; no scrapers; the no-key
+  Refresh popup offers an Open Settings button)
   (all blank by default — the user fills them in). Shows live spending
   capacity: before-65 $/yr, after-65 base + SS = all-in $/yr. Save/Cancel
   live in a fixed footer that never scrolls away; the dialog never exceeds
-  the viewport height.
+  the viewport height; **Export settings** / **Import settings** in the
+  footer move the whole settings file (`settings-YYYYMMDD-HHMM.json`,
+  profile.json format) to a clone — Import confirms first, validates the
+  file, and applies nothing on error; lots and drift log are never
+  touched.
 - **Danger Zone** — red-styled data-management tab. Delete all data (with
   a backup-first warning, an inline Download Data button, and a
   type-DELETE confirmation) wipes portfolio.csv, profile.json (settings,
@@ -323,9 +351,9 @@ the brokerage.
   RentCast key + properties),
   `accounts.json` (account registry — accounts exist independent of lots),
   `drift_log.csv`, `prices_cache.json` (prices + cached watchlist quotes),
-  backups, downloaded CSVs. Delete-all wipes all five store files
-  (the custom watchlist classes clear with the profile; the standard
-  classes are fixed content in code and reappear regardless).
+  backups, downloaded CSVs and settings exports. Delete-all wipes all five
+  store files (the custom watchlist classes clear with the profile; the
+  standard classes are fixed content in code and reappear regardless).
 
 ## Maintaining with Muse Code (Windows)
 
