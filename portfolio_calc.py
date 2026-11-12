@@ -180,7 +180,7 @@ def save_price_cache(path, prices, as_of):
         json.dump(d, f, indent=1, sort_keys=True)
 
 
-def fetch_prices(tickers, cache_path):
+def fetch_prices(tickers, cache_path, on_done=None):
     """Fetch last closes via yfinance, one ticker at a time.
 
     Batch yf.download is flaky (timeouts); per-ticker history() is reliable.
@@ -210,7 +210,7 @@ def fetch_prices(tickers, cache_path):
         prev_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(_FETCH_SOCKET_TIMEOUT)
         try:
-            got = _bounded_map(one, tickers)
+            got = _bounded_map(one, tickers, on_done=on_done)
             for t in tickers:
                 r = got.get(t)
                 v = r[1] if r is not None else "ERR:timeout"
@@ -242,14 +242,18 @@ _FETCH_SOCKET_TIMEOUT = 20
 _FETCH_TICKER_TIMEOUT = 45
 
 
-def _bounded_map(fn, items, limit=8, timeout=_FETCH_TICKER_TIMEOUT):
+def _bounded_map(fn, items, limit=8, timeout=_FETCH_TICKER_TIMEOUT,
+                 on_done=None):
     """Run fn over items on daemon threads (limit in flight), each item
     sharing one global deadline. A hung call keeps its (daemon) thread but
     never blocks the caller or interpreter exit. Returns {item: result};
     missing keys timed out. (ThreadPoolExecutor can't be used: its
     shutdown(wait=True) blocks forever on a hung future, and its
-    non-daemon threads then wedge app exit too.)"""
+    non-daemon threads then wedge app exit too.) on_done, when given, is
+    called with each item as its result lands — timeouts included, so a
+    progress bar driven by it always reaches its total."""
     results = {}
+    completed = set()
     lock = threading.Lock()
     sem = threading.Semaphore(limit)
 
@@ -261,6 +265,12 @@ def _bounded_map(fn, items, limit=8, timeout=_FETCH_TICKER_TIMEOUT):
                 r = (t, None, "ERR:worker-%s" % type(e).__name__)
             with lock:
                 results[t] = r
+                completed.add(t)
+        if on_done is not None:
+            try:
+                on_done(t)
+            except Exception:  # noqa: BLE001 - progress must not break work
+                pass
 
     workers = [threading.Thread(target=run, args=(t,), daemon=True)
                for t in items]
@@ -269,6 +279,14 @@ def _bounded_map(fn, items, limit=8, timeout=_FETCH_TICKER_TIMEOUT):
         th.start()
     for th in workers:
         th.join(timeout=max(0.0, timeout - (time.monotonic() - t0)))
+    if on_done is not None:
+        with lock:
+            missing = [t for t in items if t not in completed]
+        for t in missing:
+            try:
+                on_done(t)
+            except Exception:  # noqa: BLE001
+                pass
     return results
 
 
@@ -440,7 +458,7 @@ def load_watchlist_cache(path):
     return {}
 
 
-def fetch_watchlist(tickers, cache_path):
+def fetch_watchlist(tickers, cache_path, on_done=None):
     """Quotes + market caps for the Overview watchlist. Same cache file, a
     separate section; failures fall back to cached quotes and never crash.
     Any fund without marketCap (GLD, IBIT, ARKB, VTI, user-class ETFs)
@@ -497,7 +515,7 @@ def fetch_watchlist(tickers, cache_path):
         prev_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(_FETCH_SOCKET_TIMEOUT)
         try:
-            got = _bounded_map(one, tickers)
+            got = _bounded_map(one, tickers, on_done=on_done)
             for t in tickers:
                 r = got.get(t)
                 if r is None:
@@ -595,6 +613,21 @@ def is_negative_figure(text):
     if t.startswith("**"):
         t = t[2:]
     return re.match(r"^\(\$?[\d,]+(\.\d+)?\s?(%|pp)?\)$", t) is not None
+
+
+def rebalance_account(positions, acct_types=None):
+    """Data-driven account label for the display-only rebalance plan.
+
+    Returns (label, is_ira): the single account holding every sold asset
+    (META/VTI/GLD) plus whether its type is an IRA; otherwise ("--",
+    False). Never a hardcoded name — a fresh copy of the app must not
+    know its first owner's account names (see the LOCKED_TYPES note)."""
+    sold = {"META", "VTI", "GLD"}
+    accts = {p["account"] for p in positions if p.get("ticker") in sold}
+    if len(accts) != 1:
+        return "--", False
+    label = next(iter(accts))
+    return label, (acct_types or {}).get(label) in LOCKED_TYPES
 
 
 def compute(positions, prices, home_value, cost_basis=None, accounts=None):

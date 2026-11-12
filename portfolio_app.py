@@ -18,6 +18,7 @@ import json
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -358,6 +359,10 @@ class App(ctk.CTk):
         # Live scroll regions by stable key (re-registered on every build;
         # _keep_scrolls snapshots/restores fractions across rebuilds).
         self._scroll_keep = {}
+        # Refresh guard: one price fetch at a time — a second click while
+        # the worker runs gets an instant "sit tight" instead of a
+        # duplicate fetch piling onto a slow machine.
+        self._refreshing = False
         self.status_var = tk.StringVar(value="Ready — open the ☰ menu.")
         if key_note:
             self.status_var.set(key_note)
@@ -378,6 +383,11 @@ class App(ctk.CTk):
         self.status = SelectableMsg(top, textvariable=self.status_var,
                                     text_color="orange", wrap="none")
         self.status.pack(side="left", padx=8)
+        # Refresh progress: hidden unless a price fetch is running. The
+        # ticker count is known upfront, so this is determinate (k/N) —
+        # on a slow machine the bar, not silence, answers "is it stuck?".
+        self.refresh_bar = ctk.CTkProgressBar(top, width=120)
+        self.refresh_bar.set(0)
         self.menu_win = None
         self.bind_all("<MouseWheel>", self._wheel_scroll, add="+")
         # Standard Windows copy: click any text to focus it, Ctrl+C copies.
@@ -612,6 +622,27 @@ class App(ctk.CTk):
                     out.append(t)
         return out
 
+    def _busy(self, text):
+        # Instant ack before a blocking rebuild: status text + watch cursor,
+        # painted NOW (update_idletasks) so a slow machine never sits on a
+        # dead screen while build_all() grinds. Pair with _idle() in a
+        # finally — text-only, no widgets, per the no-fancy-stuff rule.
+        self.status_var.set(text)
+        try:
+            self.configure(cursor="watch")
+        except tk.TclError:
+            pass
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _idle(self):
+        try:
+            self.configure(cursor="")
+        except tk.TclError:
+            pass
+
     def refresh_async(self):
         # Fetch on a worker thread (network), deliver on the main thread.
         # NOTE: tkinter widgets — including after() — may only be touched
@@ -622,21 +653,53 @@ class App(ctk.CTk):
         # object, whose finalizer calls into Tk and deadlocks against the
         # main thread's Tcl loop (seen live: Font.__del__ inside a worker
         # yfinance import — yfinance is now imported once at startup).
-        self.status_var.set("Fetching prices from Yahoo Finance…")
+        if self._refreshing:
+            self.status_var.set("Already refreshing — sit tight, "
+                                "prices are on their way.")
+            return
+        self._refreshing = True
+        t0 = time.monotonic()
+        try:
+            self.configure(cursor="watch")
+        except tk.TclError:
+            pass
         tickers = sorted({p["ticker"] for p in self.positions
                           if p["ticker"] != "CASH_USD"})
         watch = self.watch_tickers()
+        total = len(tickers) + len(watch)
+        self.refresh_bar.pack(side="left", padx=8)
+        self.refresh_bar.set(0)
+        self.status_var.set("Fetching %d prices from Yahoo Finance…"
+                            % total)
         box = queue.Queue()
+        done = [0]
+        clock = threading.Lock()
+
+        def bump(_t=None):
+            # Worker threads land here per ticker; the queue carries it
+            # to the main thread — widgets are only touched in poll().
+            with clock:
+                done[0] += 1
+                box.put(("progress", done[0], total))
 
         def work():
             gc.disable()
             try:
-                prices, errors, used_cache = pc.fetch_prices(tickers, CACHE)
                 try:
-                    wq, werr, _live = pc.fetch_watchlist(watch, CACHE)
-                except Exception as e:  # noqa: BLE001 - no crash on quotes
-                    wq, werr = {}, ["watchlist: %s" % type(e).__name__]
-                box.put((prices, errors, used_cache, wq, werr))
+                    prices, errors, used_cache = pc.fetch_prices(
+                        tickers, CACHE, on_done=bump)
+                    try:
+                        wq, werr, _live = pc.fetch_watchlist(
+                            watch, CACHE, on_done=bump)
+                    except Exception as e:  # noqa: BLE001 - no crash
+                        wq, werr = {}, ["watchlist: %s" % type(e).__name__]
+                except Exception as e:  # noqa: BLE001 - never strand poll
+                    prices, errors, used_cache = (
+                        dict(self.prices),
+                        ["refresh failed: %s" % type(e).__name__], True)
+                    wq, werr = {}, []
+                box.put((prices, errors, used_cache, wq, werr,
+                         time.monotonic() - t0))
             finally:
                 gc.enable()
 
@@ -646,13 +709,36 @@ class App(ctk.CTk):
             except queue.Empty:
                 self.after(150, poll)
                 return
+            if (isinstance(payload, tuple) and len(payload) == 3
+                    and payload[0] == "progress"):
+                _done, _total = payload[1], payload[2]
+                try:
+                    self.refresh_bar.set(
+                        min(1.0, _done / _total) if _total else 0)
+                except (tk.TclError, ValueError):
+                    pass
+                self.status_var.set("Fetching prices from Yahoo "
+                                    "Finance… %d/%d" % (_done, _total))
+                self.after(150, poll)
+                return
             self._after_refresh(*payload)
 
         threading.Thread(target=work, daemon=True).start()
         self.after(150, poll)
 
     def _after_refresh(self, prices, errors, used_cache, watch_quotes=None,
-                       watch_errors=None):
+                       watch_errors=None, elapsed=None):
+        # Stand down first: the bar, cursor and guard reset even if the
+        # rebuild below ever raised — Refresh must never wedge disabled.
+        self._refreshing = False
+        try:
+            self.configure(cursor="")
+        except tk.TclError:
+            pass
+        try:
+            self.refresh_bar.pack_forget()
+        except tk.TclError:
+            pass
         self.prices = prices
         self.watch = pc.load_watchlist_cache(CACHE)
         if watch_quotes:
@@ -666,15 +752,19 @@ class App(ctk.CTk):
             self._cov_refresh_chrome()
         except (tk.TclError, ValueError, AttributeError):
             pass
+        timing = ("" if elapsed is None
+                  else " (%ds)" % int(round(elapsed)))
         if errors:
-            self.status_var.set("Price fetch partial — %s. "
+            self.status_var.set("Price fetch partial%s — %s. "
                                 "Stale tickers use last-known prices."
-                                % "; ".join(errors[:3]))
+                                % (timing, "; ".join(errors[:3])))
         elif used_cache:
-            self.status_var.set("Prices refreshed (some from cache).")
+            self.status_var.set("Prices refreshed%s (some from cache)."
+                                % timing)
         else:
-            self.status_var.set("Prices refreshed %s."
-                                % datetime.datetime.now().strftime("%H:%M"))
+            self.status_var.set("Prices refreshed %s%s."
+                                % (datetime.datetime.now().strftime("%H:%M"),
+                                   timing))
         if watch_errors:
             self.status_var.set(self.status_var.get()
                                 + " Watchlist: %s."
@@ -963,12 +1053,16 @@ class App(ctk.CTk):
                     prop["last_source"] = r["result"]["source"]
                     prop["last_asof"] = r["result"]["asof"]
                 new_props.append(prop)
-            self.profile["properties"] = new_props
-            pc.save_profile(PROFILE_JSON, self.profile)
-            self._sync_home()
-            self.recompute()
-            self.build_all()
-            self.refresh_data_window()
+            self._busy("Applying home values…")
+            try:
+                self.profile["properties"] = new_props
+                pc.save_profile(PROFILE_JSON, self.profile)
+                self._sync_home()
+                self.recompute()
+                self.build_all()
+                self.refresh_data_window()
+            finally:
+                self._idle()
             win.destroy()
             self.status_var.set("Home updated to %s."
                                 % money(self.home_value))
@@ -2135,6 +2229,25 @@ class App(ctk.CTk):
         body = ctk.CTkScrollableFrame(f)
         self._scroll_keep["diversification"] = body
         body.pack(fill="both", expand=True)
+        if not self.positions:
+            # Empty state (same rule as Overview/Accounts): zero positions
+            # means no numbers, no chart, no rebalance plan — a fresh copy
+            # must not show the previous owner's account names or sizing.
+            ctk.CTkLabel(
+                body, text="No data yet — add your first bank / account, "
+                           "or upload a filled template.",
+                font=ctk.CTkFont(size=FS_HEAD, weight="bold"),
+                wraplength=860, anchor="w").pack(padx=10, pady=(24, 8),
+                                                anchor="w")
+            ctk.CTkButton(body, text="Add your first bank / account",
+                          width=240,
+                          command=self._cov_add_account).pack(
+                              padx=10, pady=4, anchor="w")
+            ctk.CTkButton(body, text="Upload",
+                          width=240,
+                          command=self._goto_template).pack(
+                              padx=10, pady=4, anchor="w")
+            return
         self._selectable_note(
             body, "The standard — 15:15:35:15:20 of total net worth\n"
                   "• BTC 15% — asymmetric upside, not maxi "
@@ -2178,19 +2291,31 @@ class App(ctk.CTk):
         fig1 = Figure(figsize=(10, 4.2), dpi=100)
         pc.make_allocation_chart(fig1, self.data["view3"])
         self._chart_canvas(body, fig1)
-        self._selectable_note(
-            body, "REBALANCE PLAN (display only, NEVER executes "
-                  "trades). All 4 trades inside Schwab Ashu IRA: no tax "
-                  "(IRA). Verify at your brokerage before "
-                  "placing any trade.",
-            padx=6, pady=6, fill="x")
+        # Account label is data-driven — never a hardcoded name. When every
+        # sold asset sits in one IRA, name it and keep the no-tax note;
+        # otherwise stay generic (tax depends on the account used).
+        acct_types = {a.get("account"): (a.get("account_type") or "")
+                      for a in self.account_registry()}
+        acct_label, is_ira = pc.rebalance_account(self.positions, acct_types)
+        if is_ira:
+            plan_note = ("REBALANCE PLAN (display only, NEVER executes "
+                         "trades). All 4 trades inside %s: no tax "
+                         "(IRA). Verify at your brokerage before "
+                         "placing any trade." % acct_label)
+            tax_txt = "- (IRA)"
+        else:
+            plan_note = ("REBALANCE PLAN (display only, NEVER executes "
+                         "trades). Tax depends on the account used — verify "
+                         "at your brokerage before placing any trade.")
+            tax_txt = "--"
+        self._selectable_note(body, plan_note, padx=6, pady=6, fill="x")
         rows = []
         for t in self.data["view4"]["trades"]:
-            rows.append([str(t["n"]), "Schwab Ashu IRA", t["sell"],
+            rows.append([str(t["n"]), acct_label, t["sell"],
                          "--" if t["sell_sh"] is None else f"{t['sell_sh']:,}",
                          money(t["proceeds"]), t["buy"],
                          "--" if t["buy_sh"] is None else f"{t['buy_sh']:,}",
-                         "- (IRA)"])
+                         tax_txt])
         Table(body, ["#", "Account", "Sell", "Sell shares",
                      "Est. proceeds $", "Buy", "Est. buy shares", "Tax cost"],
               rows).pack(fill="both", padx=6, pady=6)
@@ -3296,14 +3421,18 @@ class App(ctk.CTk):
         self._cov_keep_scroll(self.build_data_coverage)
         self.status_var.set("Unsaved coverage edits discarded.")
 
-    def _confirm(self, title, text, ok_text="Discard"):
+    def _confirm(self, title, text, ok_text="Discard", parent=None):
         """Small modal with named confirm/cancel buttons. Returns True only
-        on the confirm button; closing the window counts as cancel."""
+        on the confirm button; closing the window counts as cancel. Pass
+        the open dialog as parent so the modal stacks above it — on Linux
+        a root-parented modal can hide behind it while its grab makes the
+        app look frozen."""
         win = ctk.CTkToplevel(self)
         win.title(title)
-        win.transient(self)
+        win.transient(parent or self)
         win.resizable(False, False)
         win.grab_set()
+        win.lift()
         SelectableMsg(win, text=text).pack(
             padx=16, pady=(14, 10), anchor="w", fill="x")
         result = {"ok": False}
@@ -4168,7 +4297,11 @@ class App(ctk.CTk):
         except OSError as e:
             self.template_msg.configure(text="Cannot read file: %s" % e)
             return
-        msg = self._ingest_rows(rows, path)
+        self._busy("Uploading %d rows…" % len(rows))
+        try:
+            msg = self._ingest_rows(rows, path)
+        finally:
+            self._idle()
         # _ingest_rows → save_lots rebuilds this tab, so write to the
         # fresh label.
         self.template_msg.configure(text=msg)
@@ -4189,12 +4322,17 @@ class App(ctk.CTk):
         except tk.TclError:
             max_h = 720
         win.geometry("620x%d" % min(720, max_h))
-        body = ctk.CTkScrollableFrame(win, width=580, height=560)
-        body.pack(fill="both", expand=True, padx=10, pady=(10, 4))
+        # Footer FIRST (side=bottom): the expanding body must never win
+        # the space race. Packing the body first starved the footer and
+        # pushed Save/Export/Import below the visible dialog on short
+        # (768px) screens. Placed first, the footer always keeps its
+        # space and the body takes only the remainder and scrolls.
         foot = ctk.CTkFrame(win, fg_color="transparent")
         foot.pack(fill="x", side="bottom", padx=10, pady=(4, 10))
         msg = SelectableMsg(foot, text="", text_color="orange")
         msg.pack(anchor="w", padx=4, pady=(0, 4))
+        body = ctk.CTkScrollableFrame(win, width=580, height=440)
+        body.pack(fill="both", expand=True, padx=10, pady=(10, 4))
         entries = {}
         fields = [("date_of_birth", "Date of birth (YYYY-MM or YYYY-MM-DD)"),
                   ("ss_owner_monthly", "Owner Social Security $/mo"),
@@ -4379,7 +4517,8 @@ class App(ctk.CTk):
             path = filedialog.asksaveasfilename(
                 defaultextension=".json", filetypes=[("JSON", "*.json")],
                 initialdir=self._downloads_dir(),
-                initialfile="settings-%s.json" % stamp)
+                initialfile="settings-%s.json" % stamp,
+                parent=win)
             if not path:
                 return
             try:
@@ -4392,7 +4531,7 @@ class App(ctk.CTk):
 
         def import_settings():
             path = filedialog.askopenfilename(
-                filetypes=[("JSON", "*.json")])
+                filetypes=[("JSON", "*.json")], parent=win)
             if not path:
                 return
             try:
@@ -4411,19 +4550,27 @@ class App(ctk.CTk):
                     "Replace ALL settings with '%s'? Portfolio lots and "
                     "the drift log are not touched."
                     % os.path.basename(path),
-                    ok_text="Import settings"):
+                    ok_text="Import settings", parent=win):
                 return
-            cleaned = {k: data[k] for k in pc.PROFILE_DEFAULTS
-                       if k in data}
-            self.profile = dict(pc.PROFILE_DEFAULTS)
-            self.profile.update(cleaned)
-            pc.save_profile(PROFILE_JSON, self.profile)
-            self._sync_home()
-            self.recompute()
-            self.build_all()
-            self.refresh_data_window()
+            self._busy("Applying imported settings…")
+            try:
+                cleaned = {k: data[k] for k in pc.PROFILE_DEFAULTS
+                           if k in data}
+                self.profile = dict(pc.PROFILE_DEFAULTS)
+                self.profile.update(cleaned)
+                pc.save_profile(PROFILE_JSON, self.profile)
+                self._sync_home()
+                self.recompute()
+                self.build_all()
+                self.refresh_data_window()
+            finally:
+                self._idle()
             win.destroy()
             self.status_var.set("Imported settings from %s." % path)
+            # Reopen pre-filled: the old dialog's fields were snapshots
+            # taken at open time, so closing it on import made the values
+            # vanish instead of appearing. Reopening shows what landed.
+            self.open_settings()
 
         exp_bar = ctk.CTkFrame(foot, fg_color="transparent")
         exp_bar.pack(fill="x", pady=(6, 0))
