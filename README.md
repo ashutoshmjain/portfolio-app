@@ -10,8 +10,11 @@ Top-level tabs, in order: **Dashboard, Diversification, Tax Harvest,
 Data Entry.** The ☰ menu holds four items: Refresh stocks,
 Refresh home estimates, Log, Settings.
 
-- **Dashboard** — sub-tabs: **Overview** (landing: net worth, spending
-  capacity, key alerts, a Copy summary button, then the Actual-vs-Standard
+- **Dashboard** — sub-tabs: **Overview** (landing: net worth, COMPUTED
+  spending radar — before-65 pool ÷ whole years to 65, IRAs ÷ 20, Social
+  Security all-in, realizable figure, Medi-Cal MAGI status + headroom and
+  the after-65 AGI guardrail, all as of today at last-refresh prices —
+  key alerts, a Copy summary button, then the Actual-vs-Standard
   daily-close LINE chart — blue Actual total $, red Standard total $,
   $2M–$5M / $100K steps, same shared implementation and values as
   Diversification; then the watchlist — standard asset classes
@@ -78,8 +81,9 @@ Refresh home estimates, Log, Settings.
   chart Google Sheets flattened).
 - **Tax Harvest** (view title "Tax Loss Harvesting") — per-lot unrealized
   P&L with Long/Short holding term, realized gains from closed lots, and a
-  user-set annual net-gains cap (blank = no cap enforced) with leeway math;
-  the cap and its note live in Settings.
+  DERIVED annual net-gains cap (Medi-Cal MAGI ceiling minus other annual
+  income — blank ceiling = no cap) with leeway math; the ceiling, the
+  other income, and the cap note live in Settings.
 - **Data Entry** (last) — sub-tabs Inputs / Template /
   Danger Zone (see below). Profile moved to Settings under the ☰ menu
   (Refresh stocks, Refresh home estimates, Log, Settings).
@@ -180,8 +184,11 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
   always records date and price.
 - Settings live in **`profile.json`** (gitignored): date of birth, monthly
   Social Security (owner + spouse), other realized gains this year + source
-  note, spending base figures, the remembered backup folder, and the last
-  backup stamp, the annual net-gains cap + note, and user-defined
+  note, Medi-Cal MAGI ceiling + other annual income + employer cover +
+  private-insurance $/person/mo + after-65 AGI threshold (the policy inputs
+  the spending radar computes from — the cap itself is derived, never
+  entered), the cap note, the remembered backup folder, and the last
+  backup stamp, and user-defined
   watchlist classes. A fresh copy ships NEUTRAL blanks — no personal values
   are seeded in the code; the user fills these in Settings (☰ menu).
 
@@ -230,22 +237,33 @@ only navigation (the ☰ menu opens no window).
   columns budget to 798px so the full grid fits a 960px split-screen window
   with no horizontal overflow; long gain strings wrap instead of clipping.
 - **Template** — row reads **Download Template | Download Data |
-  Upload | Backup | More ▾**. **Download Template** (header only),
+  Upload | Backup | Restore | More ▾**. **Download Template** (header only),
   **Download Data** (your current data, filled into the template — a plain
-  CSV for uploading into another copy of the app; defaults to your
+  lots-only CSV for uploading into another copy of the app; defaults to your
   Downloads folder as `filled-template-YYYYMMDD-HHMM.csv`, never the repo
   folder; exports the last saved state, so unsaved Inputs edits ask Save &
   Download / Download saved state / Cancel), **Upload** (reports "N rows:
-  X updated, Y inserted"), **Backup** (one-click backup into your
-  remembered backup folder — timestamped `filled-template-*.csv` files
-  accumulate; a synced Drive/OneDrive/Dropbox folder carries them to other
-  machines, no cloud integration — plus a last-backup stamp and a
-  Change-backup-folder button), and a **More ▾** menu holding the secondary
+  X updated, Y inserted"), **Backup** (one-click ENCRYPTED backup of the
+  whole data set — lots, settings, drift log, price cache, account registry
+  — as a timestamped `backup-YYYYMMDD-HHMM/` set of JSON files into your
+  remembered backup folder; sets accumulate, never overwritten; the folder
+  must be cloud-synced — Google Drive for now — the chooser defaults to a
+  cloud root and warns on a local folder; a passphrase is asked every time
+  and never stored; wrong passphrase = unrestorable, no recovery path),
+  **Restore** (lists the timestamped sets in the backup folder — pick one,
+  retype the passphrase, confirm; EVERYTHING is decrypted and validated
+  first, so a corrupt set or wrong passphrase errors plainly with current
+  data untouched; offers to back up current data first when no set exists
+  from today; then replaces all five data files and rebuilds), and a
+  **More ▾** menu holding the secondary
   actions **Paste rows** (clipboard TSV/CSV) and **Copy AI prompt**
   (ready-made screenshot-to-CSV prompt for any AI) — no Import broker CSV:
   it duplicated Upload (both accepted only template-shaped files), so it was
   deleted and the template is the one way in. Download = save-dialog each
-  time, anywhere; backup = remembered folder + one click + stamp. The tab
+  time, anywhere; backup/restore = remembered cloud folder + passphrase.
+  Upload stays CSV (the human exchange format); backup/restore are JSON
+  throughout (exact machine round-trip, encrypted with the passphrase).
+  The tab
   also carries a per-field broker guide (Schwab + Vanguard paths,
   CSV-export pointers, 1099-B note) plus a "Which broker export to start
   from" block with the exact Schwab (Positions → Cost Basis $ / Lot Details
@@ -264,10 +282,11 @@ only navigation (the ☰ menu opens no window).
   not prices (the clone fetches its own) and not home value (set it
   identically in the clone).
 - **Settings** (☰ menu dialog, formerly the Profile sub-tab) — date of
-  birth, SS amounts, allowed spending $/yr before 65 and after-65 base
-  (enterable here — Overview, Liquidity and the live summary all update
-  from them), other gains + note, optional home purchase price,
-  annual net-gains cap $/yr (blank = no cap enforced) + cap reason/note,
+  birth, SS amounts, Medi-Cal MAGI ceiling $/yr (blank = no cap derived),
+  other annual income $/yr (W-2/pension), employer medical cover yes/no
+  (MAGI section N/A when on), private insurance $/person/mo, after-65
+  federal-tax-free AGI threshold $/yr, other gains + note, optional home
+  purchase price, cap context note (shown next to the budget),
   RentCast API key (free Developer tier, pasted in by the user — an
   address-like value is refused, keys have no spaces or commas) and the
   Properties list (one address row present by default; blank-address rows
@@ -275,8 +294,9 @@ only navigation (the ☰ menu opens no window).
   property, Add/Remove; Redfin and Zillow enter through the manual applied
   value — check in the browser, type the number; no scrapers; the no-key
   Refresh popup offers an Open Settings button)
-  (all blank by default — the user fills them in). Shows live spending
-  capacity: before-65 $/yr, after-65 base + SS = all-in $/yr. Save/Cancel
+  (all blank by default — the user fills them in). Shows the computed
+  spending radar (as of today): before-65 pool ÷ yrs, after-65 IRAs ÷ 20 +
+  SS = all-in, realizable figure, age, turn-65 date. Save/Cancel
   live in a fixed footer that never scrolls away; the dialog never exceeds
   the viewport height; **Export settings** / **Import settings** in the
   footer move the whole settings file (`settings-YYYYMMDD-HHMM.json`,
@@ -318,6 +338,23 @@ the brokerage.
 ## Windows setup
 
 1. Install Python 3.11+ from python.org (tick "Add python.exe to PATH").
+   Check what you have first:
+   ```
+   python --version
+   ```
+   If it prints 3.11 or newer, continue. If it prints an older version
+   (e.g. 3.9) but 3.11+ is also installed, use the launcher form:
+   ```
+   py -3.11 -m pip install -r requirements.txt
+   py -3.11 portfolio_app.py
+   ```
+   If you have no Python, install 3.11+ from python.org first.
+   Optional one-line variant for users with other Python tools — a venv
+   still uses the base interpreter's version, so it does NOT fix an old
+   Python (see the version check above):
+   ```
+   python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
+   ```
 2. Open Command Prompt in this folder and run:
    ```
    pip install -r requirements.txt
@@ -355,16 +392,21 @@ the brokerage.
   replaced by `portfolio.csv` + `profile.json`. The old files sit in a
   dated backup folder next to the app folder
   (`portfolio-app-backup-20261102`); delete it after a few confident runs.
-- **Drift baseline**: the calendar-year baseline is Dec 30, 2025
-  (liquid $3,595K, home $931K). Every January, update BASELINE_LIQUID /
-  BASELINE_HOME and JAN1_PRICES in `portfolio_calc.py` from the new
-  December snapshot.
+- **Drift baseline**: derived, never hardcoded. The baseline is the drift
+  log's year-start row (first row of the current year, else last row of
+  the prior December) — the display renders that row's totals. Year-start
+  prices for the standard YTD come from Yahoo history (first trading day
+  of the year), cached per-year in `prices_cache.json` on Refresh. Both
+  roll every January with no code edits; a fresh/empty log shows unknown
+  drift, never a previous owner's numbers.
 - **Data files** (all gitignored, never committed): `portfolio.csv`
-  (lots), `profile.json` (settings + cap + user watchlist classes +
-  RentCast key + properties),
+  (lots), `profile.json` (settings + policy inputs + user watchlist
+  classes + RentCast key + properties),
   `accounts.json` (account registry — accounts exist independent of lots),
-  `drift_log.csv`, `prices_cache.json` (prices + cached watchlist quotes),
-  backups, downloaded CSVs and settings exports. Delete-all wipes all five
+  `drift_log.csv`, `prices_cache.json` (prices + cached watchlist quotes +
+  cached year-start prices), downloaded CSVs and settings exports.
+  Encrypted backup sets live in the remembered CLOUD folder (not the repo).
+  Delete-all wipes all five
   store files (the custom watchlist classes clear with the profile; the
   standard classes are fixed content in code and reappear regardless).
 
@@ -378,4 +420,6 @@ it to change views, add a tab, or adjust the standard. The logic lives in
 ## Safety
 
 - NEVER executes trades. NEVER writes to Google Sheets. NEVER sends
-  anything outward. NEVER asks for passwords.
+  anything outward. The ONLY secret it ever asks for is the backup
+  passphrase (typed at Backup, retyped at Restore — never stored, never
+  logged, never in the repo; without it a set cannot be restored).

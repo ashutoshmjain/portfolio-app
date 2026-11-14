@@ -20,7 +20,10 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
+# NOTE: no messagebox anywhere — every dialog is the copyable custom
+# modal (_confirm / _confirm3 rendering SelectableMsg), per the no-native-
+# dialog rule. Do not reintroduce messagebox.
 
 import customtkinter as ctk
 
@@ -470,9 +473,16 @@ class App(ctk.CTk):
     def recompute(self):
         self.positions = pc.positions_from_lots(self.lots)
         self.cost_basis = pc.cost_map_from_lots(self.lots)
+        # Drift inputs derive per recompute: baseline from the drift log's
+        # year-start row, year-start prices from the price cache (filled
+        # once per year on Refresh). Nothing hardcoded, ever.
+        year = datetime.date.today().year
+        base = pc.year_baseline(pc.load_drift_log(DRIFT_LOG), year)
+        start = pc.cached_year_start(CACHE, year)
         self.data = pc.compute(self.positions, self.prices, self.home_value,
                                self.cost_basis,
-                               accounts=self.registry_accounts_arg())
+                               accounts=self.registry_accounts_arg(),
+                               drift_start=start, drift_baseline=base)
 
     def save_lots(self, msg="Data saved."):
         # File + main views only. Data Entry refresh is explicit at each
@@ -577,14 +587,17 @@ class App(ctk.CTk):
                 not isinstance(data["rentcast_key"], str):
             return "'rentcast_key' must be text"
         for key in ("ss_owner_monthly", "ss_spouse_monthly",
-                    "spending_before65_annual",
-                    "spending_after65_base_annual",
-                    "other_realized_gains_current_year"):
+                    "other_realized_gains_current_year",
+                    "other_annual_income",
+                    "private_insurance_per_person_mo"):
             if key in data:
                 try:
                     float(data[key] or 0)
                 except (TypeError, ValueError):
                     return "'%s' must be a number" % key
+        # Legacy key: the entered cap is gone (now derived), but old
+        # files/backups may still carry it — still validated, still
+        # ignored everywhere else.
         if "annual_net_gains_cap" in data and \
                 data["annual_net_gains_cap"] not in (None, ""):
             try:
@@ -592,6 +605,15 @@ class App(ctk.CTk):
                     raise ValueError
             except (TypeError, ValueError):
                 return "'annual_net_gains_cap' must be blank or a number"
+        for key in ("magi_ceiling_annual", "after65_agi_threshold"):
+            if key in data and data[key] not in (None, ""):
+                try:
+                    float(data[key])
+                except (TypeError, ValueError):
+                    return "'%s' must be blank or a number" % key
+        if "employer_medical_cover" in data and \
+                not isinstance(data["employer_medical_cover"], bool):
+            return "'employer_medical_cover' must be true/false"
         if "home_purchase_price" in data and data["home_purchase_price"] \
                 not in (None, ""):
             try:
@@ -688,6 +710,14 @@ class App(ctk.CTk):
                 try:
                     prices, errors, used_cache = pc.fetch_prices(
                         tickers, CACHE, on_done=bump)
+                    # Year-start prices for the standard YTD, once per
+                    # year, in this same fetch cycle — never backgrounded,
+                    # never on start. Failures leave drift unknown.
+                    try:
+                        pc.ensure_year_start(
+                            CACHE, datetime.date.today().year)
+                    except Exception:  # noqa: BLE001 - drift stays unknown
+                        pass
                     try:
                         wq, werr, _live = pc.fetch_watchlist(
                             watch, CACHE, on_done=bump)
@@ -1157,6 +1187,15 @@ class App(ctk.CTk):
             w = event.widget
         except AttributeError:
             return None
+        # Destroyed widgets arrive as a path-name string, not a widget:
+        # a string has no .master, so resolve it (or bail) instead of
+        # raising AttributeError noise on stderr. Library-side CustomTk
+        # scroll noise is not ours to fix — this guards only our walk.
+        if isinstance(w, str):
+            try:
+                w = self.nametowidget(w)
+            except (tk.TclError, KeyError, AttributeError):
+                return None
         while w is not None and w is not self:
             if isinstance(w, Table):
                 try:
@@ -1414,32 +1453,81 @@ class App(ctk.CTk):
             self.build_watchlist(body)
             return
         tnw = self.data["tnw"]
-        sp = pc.spending_capacity(self.profile)
+        # Computed figures from live values — the radar as of today
+        # (prices/home at the last refresh), never entered numbers.
+        sp = pc.spending_capacity(self.profile, self.lots, self.prices)
         d = self.data["drift"]
-        year = datetime.date.today().year
-        realized, _unk, _rows = pc.realized_gains_year(
-            self.lots, year,
-            self.profile.get("other_realized_gains_current_year", 0) or 0.0)
-        cap = self.profile.get("annual_net_gains_cap")
-        cap = None if cap is None else float(cap)
+        cap = sp["cap"]
         cap_note = (self.profile.get("cap_note") or "").strip()
         missing = self._required_missing()
         ctk.CTkLabel(body, text="Total net worth: %s" % money(tnw),
                      font=ctk.CTkFont(size=FS_TITLE, weight="bold")).pack(
                          padx=10, pady=(10, 2), anchor="w")
         ctk.CTkLabel(
-            body, text="Allowed spending: %s/yr before 65 · %s/yr after 65 "
-                    "(base %s + Social Security)." % (
-                        money(sp["before65"]), money(sp["after65_allin"]),
-                        money(sp["after65_base"])),
+            body, text="Allowed spending (as of %s; prices/home at last "
+                    "refresh): %s/yr before 65 (pool %s ÷ %s yrs) · "
+                    "%s/yr after 65 (IRAs %s ÷ 20; + Social Security "
+                    "= %s)." % (
+                        sp["asof"], money(sp["before65"]),
+                        money(sp["under65"]),
+                        "--" if sp["div_years"] is None
+                        else "%d" % sp["div_years"],
+                        money(sp["after65_base"]), money(sp["ira"]),
+                        money(sp["after65_allin"])),
             font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2, anchor="w")
-        if cap is None:
-            leeway_alert = ("No net-gains cap set — set one in Settings "
-                            "(☰ menu).")
+        if sp["realizable"] is None:
+            real_line = ("Realizable this year: — (set a MAGI ceiling in "
+                         "Settings so headroom can derive).")
         else:
-            leeway_alert = ("Tax-loss-harvest leeway: %s of the %s cap%s."
-                            % (money(cap - realized), money(cap),
-                               " (%s)" % cap_note if cap_note else ""))
+            real_line = ("Realizable this year ≈ %s (cash %s on hand + "
+                         "sales within the %s gains cap)." % (
+                             money(sp["realizable"]), money(sp["real_cash"]),
+                             money(cap)))
+        ctk.CTkLabel(body, text=real_line,
+                     font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2,
+                                                          anchor="w")
+        if sp["magi_status"] == "na":
+            magi_alert = ("Medi-Cal: employer medical cover — "
+                          "MAGI section not applicable.")
+        elif sp["magi_status"] == "within":
+            magi_alert = ("Medi-Cal MAGI %s of %s ceiling: WITHIN by %s."
+                          % (money(sp["magi"]), money(sp["ceiling"]),
+                             money(sp["ceiling"] - sp["magi"])))
+        elif sp["magi_status"] == "over":
+            try:
+                ins = float(self.profile.get(
+                    "private_insurance_per_person_mo", 1000) or 1000)
+            except (ValueError, TypeError):
+                ins = 1000.0
+            magi_alert = ("Medi-Cal MAGI %s vs %s ceiling: OVER by %s — "
+                          "cover lost ≈ %s/yr private for two."
+                          % (money(sp["magi"]), money(sp["ceiling"]),
+                             money(sp["magi"] - sp["ceiling"]),
+                             money(ins * 12 * 2)))
+        else:
+            magi_alert = ("Medi-Cal MAGI unknown — set a ceiling in "
+                          "Settings (☰ menu).")
+        if sp["headroom"] is None:
+            headroom_alert = ("Gains headroom unknown — no ceiling set.")
+        else:
+            headroom_alert = ("Gains headroom: %s of the %s cap%s. "
+                              "Harvesting losses increases headroom."
+                              % (money(sp["headroom"]), money(cap),
+                                 " (%s)" % cap_note if cap_note else ""))
+        if sp["agi_threshold"] is None or sp["agi_total"] is None:
+            agi_alert = ("After-65 AGI guardrail: no threshold set — "
+                         "set one in Settings.")
+        else:
+            agi_alert = ("After-65 AGI guardrail: IRAs/20 %s + other %s = "
+                         "%s vs %s threshold: %s by %s (SS taxation not "
+                         "modeled)."
+                         % (money(sp["after65_base"]), money(sp["other"]),
+                            money(sp["agi_total"]),
+                            money(sp["agi_threshold"]),
+                            "UNDER" if sp["agi_total"] <= sp["agi_threshold"]
+                            else "OVER",
+                            money(abs(sp["agi_threshold"]
+                                      - sp["agi_total"]))))
         alerts = [
             # No wrapping parens around the drift figure: the shared
             # formatters already parenthesize negatives, so "(%s)" would
@@ -1447,7 +1535,9 @@ class App(ctk.CTk):
             "Drift vs standard: actual %s vs standard %s; drift %s." % (
                 pct(d["actual_ytd"]), pct(d["standard_ytd"]),
                 pct(d["drift_pp"])),
-            leeway_alert,
+            magi_alert,
+            headroom_alert,
+            agi_alert,
             "%d REQUIRED position%s still missing cost or dates — feed "
             "them in Data Entry." % (missing, "" if missing == 1 else "s")
             if missing else
@@ -1457,10 +1547,12 @@ class App(ctk.CTk):
             ctk.CTkLabel(body, text="• " + alert, wraplength=860,
                          anchor="w").pack(padx=10, pady=1, anchor="w")
         summary = ("Total net worth: %s\n"
-                   "Allowed spending: %s/yr before 65 · %s/yr after 65 "
-                   "(base %s + Social Security).\n%s"
-                   % (money(tnw), money(sp["before65"]),
-                      money(sp["after65_allin"]), money(sp["after65_base"]),
+                   "Allowed spending (as of %s): %s/yr before 65 · "
+                   "%s/yr after 65 (+ Social Security = %s).\n"
+                   "%s\n%s"
+                   % (money(tnw), sp["asof"], money(sp["before65"]),
+                      money(sp["after65_base"]), money(sp["after65_allin"]),
+                      real_line,
                       "\n".join("• " + a for a in alerts)))
         ctk.CTkButton(body, text="Copy summary", width=140,
                       command=lambda:
@@ -1811,6 +1903,11 @@ class App(ctk.CTk):
         # ONE expanding table, ONE scroll region: each summary row carries
         # its own ▶/▼ expander; per-account rows insert directly beneath.
         # No lower panel, no nested scrolls.
+        # DELIBERATE (Prompt 7 Delta 2, Issue 7 — decided, not a bug): no
+        # `if not self.positions` guard here, unlike Overview. With zero
+        # positions but a saved property, Holdings shows the RE home row
+        # and its TOTAL while Overview shows "No data yet". The home is a
+        # real asset; the inconsistency is accepted — do not re-flag.
         f = self._clear_dash("Holdings")
         if getattr(self, "_hold_expanded", None) is None:
             self._hold_expanded = set()
@@ -2136,7 +2233,7 @@ class App(ctk.CTk):
                          anchor="w", wraplength=[170, 130, 150, 130][col],
                          font=ctk.CTkFont(weight="bold")).grid(
                              row=0, column=col + 1, padx=2, sticky="w")
-        sp = pc.spending_capacity(self.profile)
+        sp = pc.spending_capacity(self.profile, self.lots, self.prices)
         years = (under / sp["before65"]) if sp["before65"] else None
         self._selectable_note(
             f, "Home %s · net worth %s. Available-now total ÷ "
@@ -2337,13 +2434,17 @@ class App(ctk.CTk):
                      "After %"],
               rows).pack(fill="both", padx=6, pady=6)
         d = self.data["drift"]
+        # The baseline renders from the drift log's year-start row — never
+        # literal owner numbers. No baseline yet (empty log) reads as
+        # unknown, not as a previous owner's $4,526K.
         drift_txt = (
-            "Drift (calendar-year baseline $4,526K = liquid $3,595K + home "
-            "$931K): actual YTD %s | standard YTD %s | drift %s, %s | "
+            "Drift (calendar-year baseline %s = liquid %s + home %s): "
+            "actual YTD %s | standard YTD %s | drift %s, %s | "
             "standard total %s"
-            % (pct(d["actual_ytd"]), pct(d["standard_ytd"]),
-               pct(d["drift_pp"]), money(d["drift_dollar"]),
-               money(d["standard_total"])))
+            % (money(d["baseline_total"]), money(d["baseline_liquid"]),
+               money(d["baseline_home"]), pct(d["actual_ytd"]),
+               pct(d["standard_ytd"]), pct(d["drift_pp"]),
+               money(d["drift_dollar"]), money(d["standard_total"])))
         self._selectable_note(body, drift_txt, padx=6, pady=6, fill="x")
         fig2 = Figure(figsize=(10, 6.0), dpi=100)
         pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG))
@@ -2421,8 +2522,9 @@ class App(ctk.CTk):
             Table(body, ["Sold %d — asset" % year, "Account", "Shares",
                          "Cost $", "Sale $", "Sold", "Term", "Gain $"],
                   srows).pack(fill="x", padx=6, pady=6)
-        cap = self.profile.get("annual_net_gains_cap")
-        cap = None if cap is None else float(cap)
+        # Derived cap: Medi-Cal MAGI ceiling minus other annual income
+        # (Settings). None when no ceiling is set — never hardcoded.
+        cap = pc.gains_cap(self.profile)
         cap_note = (self.profile.get("cap_note") or "").strip()
         other = self.profile.get("other_realized_gains_current_year",
                                  0) or 0.0
@@ -3450,6 +3552,36 @@ class App(ctk.CTk):
         self.wait_window(win)
         return result["ok"]
 
+    def _confirm3(self, title, text, labels, parent=None):
+        """Three-way copyable modal: _confirm is 2-way, but the unsaved-
+        edits gate needs three outcomes (save-first / saved-state-only /
+        cancel). Returns the button index; closing the window counts as
+        the last (cancel) outcome."""
+        win = ctk.CTkToplevel(self)
+        win.title(title)
+        win.transient(parent or self)
+        win.resizable(False, False)
+        win.grab_set()
+        win.lift()
+        SelectableMsg(win, text=text).pack(
+            padx=16, pady=(14, 10), anchor="w", fill="x")
+        result = {"idx": None}
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(0, 14))
+
+        def _pick(i):
+            result["idx"] = i
+            win.destroy()
+
+        for i, label in enumerate(labels):
+            ctk.CTkButton(bar, text=label, width=150,
+                          command=lambda i=i: _pick(i)).pack(
+                              side="left", padx=(0, 8))
+        self.wait_window(win)
+        if result["idx"] is None:
+            return len(labels) - 1
+        return result["idx"]
+
     def _cov_discard(self):
         # "Revert" never said WHAT it reverts, so it read as if saved work
         # were at risk. It discards only this session's unsaved staged
@@ -3654,11 +3786,12 @@ class App(ctk.CTk):
 
     def _cov_delete(self, rid):
         row = self._cov_row_by_rid(rid)
-        if not messagebox.askyesno(
+        if not self._confirm(
                 "Delete lot",
                 "Delete this lot row?\n%s — %s (%s)\nOnly this row is "
                 "removed." % (row.get("account"), row.get("asset"),
-                               row.get("shares"))):
+                               row.get("shares")),
+                ok_text="Delete"):
             return
         W = self.cov_widgets.pop(rid, {})
         try:
@@ -4004,17 +4137,25 @@ class App(ctk.CTk):
                       command=self.upload_template).pack(side="left", padx=4)
         ctk.CTkButton(bar, text="Backup",
                       command=self.backup_now).pack(side="left", padx=4)
+        restore_btn = ctk.CTkButton(bar, text="Restore",
+                                        command=self.restore_backup)
+        restore_btn.pack(side="left", padx=4)
+        self._tooltip(restore_btn, "Restore: pick an encrypted backup "
+                                    "set and replace current data with it.")
         self.template_more_menu = ctk.CTkOptionMenu(
             bar, values=["Paste rows", "Copy AI prompt"],
             command=self._template_more, width=110)
         self.template_more_menu.set("More ▾")
         self.template_more_menu.pack(side="left", padx=4)
         ctk.CTkLabel(
-            f, text="Download Data: your current data, filled "
-                   "into the template — upload it into another copy of the "
-                   "app. Backup: one-click backup into your remembered "
-                   "backup folder (a synced Drive/OneDrive/Dropbox folder "
-                   "carries it to other machines — no cloud built in).",
+            f, text="Download Data: your current data, filled into the "
+                   "lots-only CSV template — upload it into another copy "
+                   "of the app. Backup: one-click ENCRYPTED backup of the "
+                   "whole data set (lots, settings, drift, prices, "
+                   "registry) as JSON into your remembered cloud folder "
+                   "(passphrase asked every time, never stored). Restore: "
+                   "pick a set and replace current data with it. Upload "
+                   "stays CSV; backups are JSON throughout.",
             text_color=CLR_SECONDARY, wraplength=860,
             anchor="w").pack(padx=12, anchor="w")
         stamp = self.profile.get("last_backup_time")
@@ -4160,20 +4301,7 @@ class App(ctk.CTk):
         with open(path, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=pc.LOT_FIELDS)
             w.writeheader()
-            for lot in lots:
-                w.writerow({
-                    "bank": lot.get("bank", ""),
-                    "account": lot.get("account", ""),
-                    "account_type": lot.get("account_type", ""),
-                    "asset": lot.get("asset", ""),
-                    "shares": "" if lot.get("shares") is None
-                    else lot["shares"],
-                    "cost_per_share": "" if lot.get("cost") is None
-                    else lot["cost"],
-                    "acquired_date": lot.get("acquired", ""),
-                    "sold_date": lot.get("sold_date", ""),
-                    "sale_price_per_share": ""
-                    if lot.get("sale_price") is None else lot["sale_price"]})
+            w.writerows(self._template_row_dicts(lots))
 
     def download_full_template(self):
         path = filedialog.asksaveasfilename(
@@ -4199,17 +4327,16 @@ class App(ctk.CTk):
         self._ensure_cov_state()
         if not self._cov_counts():
             return True
-        choice = messagebox.askyesnocancel(
+        choice = self._confirm3(
             "Unsaved edits",
             "The Inputs grid has unsaved edits.\n\n"
-            "Yes = Save first, then %s.\n"
-            "No = %s the last saved state "
-            "(unsaved edits excluded).\n"
-            "Cancel = go back without %s." % (action, action.capitalize(),
-                                             action))
-        if choice is None:
+            "Save first, then %s — or %s the last saved state "
+            "(unsaved edits excluded)?" % (action, action.capitalize()),
+            ["Save first", "%s saved state" % action.capitalize(),
+             "Cancel"])
+        if choice == 2:
             return False
-        if choice and not self._cov_save():
+        if choice == 0 and not self._cov_save():
             self.template_msg.configure(
                 text="%s cancelled — fix the flagged rows, "
                      "then save." % action.capitalize())
@@ -4235,45 +4362,387 @@ class App(ctk.CTk):
                 text="Wrote %s with your current data to %s"
                      % (_n(len(self.lots), "row"), path))
 
+    def _cloud_roots(self):
+        """Known cloud-sync roots that actually exist on this machine."""
+        import glob as _glob
+        home = os.path.expanduser("~")
+        cands = [os.path.join(home, n) for n in
+                 ("Google Drive", "OneDrive", "Dropbox", "iCloudDrive")]
+        cands += _glob.glob(os.path.join(home, "OneDrive*"))
+        for drive in ("G", "H", "I", "J", "K", "L"):
+            # Drive for Desktop mounts a virtual drive (default G:).
+            cands.append("%s:\\My Drive" % drive)
+        return [os.path.normcase(os.path.abspath(c)) for c in cands
+                if os.path.isdir(c)]
+
+    def _is_cloud_path(self, path):
+        mine = os.path.normcase(os.path.abspath(path or ""))
+        return any(mine == r or mine.startswith(r + os.sep)
+                   for r in self._cloud_roots())
+
+    def _cloud_default_dir(self):
+        roots = self._cloud_roots()
+        if roots:
+            return roots[0]
+        return self._downloads_dir()
+
     def change_backup_folder(self):
         folder = filedialog.askdirectory(
-            title="Pick a backup folder (a synced Drive/OneDrive/Dropbox "
-                  "folder carries backups to other machines)")
-        if folder:
-            self.profile["backup_folder"] = folder
-            pc.save_profile(PROFILE_JSON, self.profile)
-            self.refresh_data_window()
-            self.status_var.set("Backup folder set to %s." % folder)
+            initialdir=self._cloud_default_dir(),
+            title="Pick a backup folder — a cloud-synced folder "
+                  "(Drive/OneDrive/Dropbox) carries sets to other machines")
+        if not folder:
+            return
+        if not self._is_cloud_path(folder) and not self._confirm(
+                "Not a cloud folder",
+                "This folder is not under a known cloud sync root "
+                "(Google Drive, OneDrive, Dropbox). A backup here dies "
+                "with this machine.\nUse it anyway?",
+                ok_text="Use anyway"):
+            return
+        self.profile["backup_folder"] = folder
+        pc.save_profile(PROFILE_JSON, self.profile)
+        self.refresh_data_window()
+        self.status_var.set("Backup folder set to %s." % folder)
+
+    def _template_row_dicts(self, lots):
+        """CSV-shaped string dicts — the exact template format (blanks stay
+        blank). Shared by the CSV writer and the JSON backup set, so a
+        backup's lots validate and restore through the same path."""
+        return [{
+            "bank": lot.get("bank", ""),
+            "account": lot.get("account", ""),
+            "account_type": lot.get("account_type", ""),
+            "asset": lot.get("asset", ""),
+            "shares": "" if lot.get("shares") is None
+            else lot["shares"],
+            "cost_per_share": "" if lot.get("cost") is None
+            else lot["cost"],
+            "acquired_date": lot.get("acquired", ""),
+            "sold_date": lot.get("sold_date", ""),
+            "sale_price_per_share": ""
+            if lot.get("sale_price") is None else lot["sale_price"]}
+            for lot in lots]
+
+    def _ask_passphrase(self, title, confirm=False):
+        """Masked passphrase prompt. Never stored, never logged, never in
+        the repo. Returns the passphrase, or None on cancel."""
+        win = ctk.CTkToplevel(self)
+        win.title(title)
+        win.transient(self)
+        win.resizable(False, False)
+        win.grab_set()
+        win.lift()
+        SelectableMsg(win, text="Type the backup passphrase. It is never "
+                                "stored — lose it and the set cannot be "
+                                "restored.").pack(
+            padx=16, pady=(14, 6), anchor="w", fill="x")
+        ents = []
+        for label in (("Passphrase", "Confirm passphrase") if confirm
+                      else ("Passphrase",)):
+            ctk.CTkLabel(win, text=label).pack(anchor="w", padx=16)
+            ent = ctk.CTkEntry(win, width=300, show="*")
+            ent.pack(anchor="w", padx=16, pady=(0, 8))
+            ents.append(ent)
+        result = {"pw": None}
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(0, 14))
+
+        def _ok():
+            first = ents[0].get()
+            if confirm and first != ents[1].get():
+                SelectableMsg(win, text="Passphrases do not match — "
+                                        "retype both.",
+                              text_color="orange").pack(padx=16, pady=4)
+                return
+            if not first:
+                SelectableMsg(win, text="Empty passphrase — type one or "
+                                        "Cancel.",
+                              text_color="orange").pack(padx=16, pady=4)
+                return
+            result["pw"] = first
+            for ent in ents:
+                ent.delete(0, "end")
+            win.destroy()
+
+        ctk.CTkButton(bar, text="OK", width=120,
+                      command=_ok).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(bar, text="Cancel", width=120,
+                      command=win.destroy).pack(side="left")
+        try:
+            ents[0].focus_set()
+        except tk.TclError:
+            pass
+        self.wait_window(win)
+        return result["pw"]
+
+    def _read_json_file(self, path, default):
+        try:
+            with open(path) as fh:
+                return json.load(fh)
+        except (ValueError, OSError):
+            return default
 
     def backup_now(self):
-        """One-click backup of the filled template CSV into the remembered
-        backup folder. First use asks for the folder (changeable via
-        Change backup folder). Files accumulate — never overwritten.
-        Backup = filled template CSV ONLY (no settings data)."""
+        """One-click ENCRYPTED JSON backup of the whole data set (lots,
+        settings, drift log, price cache, account registry) as a
+        timestamped set in the remembered backup folder. Sets accumulate
+        — never overwritten. The folder must be cloud-synced (Drive for
+        now): the chooser defaults to a cloud root and warns on a local
+        folder. The passphrase is asked every time, never stored.
+        Backup = whole app state as encrypted JSON; Download Data stays
+        the lots-only CSV exchange format."""
         if not self._ensure_saved("back up"):
             return
         folder = self.profile.get("backup_folder") or ""
         if not folder or not os.path.isdir(folder):
             folder = filedialog.askdirectory(
-                title="Pick a backup folder (a synced Drive/OneDrive/ "
-                      "Dropbox folder carries backups to other machines)")
+                initialdir=self._cloud_default_dir(),
+                title="Pick a backup folder — a cloud-synced folder "
+                      "(Drive/OneDrive/Dropbox) carries sets to other "
+                      "machines)")
             if not folder:
                 return
+            if not self._is_cloud_path(folder) and not self._confirm(
+                    "Not a cloud folder",
+                    "This folder is not under a known cloud sync root. "
+                    "A backup here dies with this machine.\nUse it anyway?",
+                    ok_text="Use anyway"):
+                return
             self.profile["backup_folder"] = folder
-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
-        path = os.path.join(folder, "filled-template-%s.csv" % stamp)
+        pw = self._ask_passphrase("Backup passphrase", confirm=True)
+        if not pw:
+            self.template_msg.configure(
+                text="Backup cancelled — no passphrase, nothing written.")
+            return
+        drift_rows = []
         try:
-            self._write_template_csv(path, self.lots)
+            with open(DRIFT_LOG, newline="") as fh:
+                drift_rows = list(csv.DictReader(fh))
+        except OSError:
+            pass
+        datasets = {
+            "lots": self._template_row_dicts(self.lots),
+            "profile": dict(self.profile),
+            "drift": drift_rows,
+            "prices": self._read_json_file(CACHE, {}),
+            "accounts": self._read_json_file(ACCOUNTS_JSON,
+                                             {"accounts": []}),
+            "_passphrase": pw,
+        }
+        try:
+            keyparams, enc = pc.backup_encrypt(datasets)
+        except (ValueError, RuntimeError) as e:
+            self.template_msg.configure(text="Backup failed: %s" % e)
+            return
+        finally:
+            datasets["_passphrase"] = ""
+            del pw
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+        setdir = os.path.join(folder, "backup-%s" % stamp)
+        try:
+            os.makedirs(setdir)
+            with open(os.path.join(setdir, "keyparams.json"), "w") as fh:
+                json.dump(keyparams, fh, indent=1, sort_keys=True)
+            for name in pc.BACKUP_DATASETS:
+                with open(os.path.join(setdir, name + ".json.enc"),
+                          "wb") as fh:
+                    fh.write(enc[name])
         except OSError as e:
+            import shutil as _shutil
+            _shutil.rmtree(setdir, ignore_errors=True)
             self.template_msg.configure(text="Backup failed: %s" % e)
             return
         self.profile["last_backup_time"] = stamp[:8] + " " + stamp[9:]
-        self.profile["last_backup_path"] = path
+        self.profile["last_backup_path"] = setdir
         pc.save_profile(PROFILE_JSON, self.profile)
         self.refresh_data_window()
         self.template_msg.configure(
-            text="Backed up %s to %s"
-                 % (_n(len(self.lots), "row"), path))
+            text="Backed up %s + settings + drift + prices + registry "
+                 "(encrypted) to %s" % (_n(len(self.lots), "row"), setdir))
+
+    def _backup_sets(self, folder):
+        """Timestamped set dirs in the folder, newest first. A valid set
+        holds keyparams.json plus one .json.enc per data set."""
+        sets = []
+        try:
+            names = sorted(os.listdir(folder), reverse=True)
+        except OSError:
+            return sets
+        for name in names:
+            setdir = os.path.join(folder, name)
+            if not (name.startswith("backup-")
+                    and os.path.isdir(setdir)):
+                continue
+            if not os.path.isfile(os.path.join(setdir, "keyparams.json")):
+                continue
+            if all(os.path.isfile(os.path.join(
+                    setdir, n + ".json.enc")) for n in pc.BACKUP_DATASETS):
+                sets.append(name)
+        return sets
+
+    def restore_backup(self):
+        """Restore an encrypted JSON backup set: pick a set, retype its
+        passphrase, validate EVERYTHING first — a corrupt set or wrong
+        passphrase errors plainly with current data untouched — then
+        replace all five data files and rebuild. Backup-first is offered
+        when no set exists from today."""
+        folder = self.profile.get("backup_folder") or ""
+        if not folder or not os.path.isdir(folder):
+            self.template_msg.configure(
+                text="No backup folder set — press Backup first (it asks "
+                     "for the folder).")
+            return
+        sets = self._backup_sets(folder)
+        if not sets:
+            self.template_msg.configure(
+                text="No backup sets in %s yet — press Backup first."
+                % folder)
+            return
+        win = ctk.CTkToplevel(self)
+        win.title("Restore backup")
+        win.transient(self)
+        win.resizable(False, False)
+        win.grab_set()
+        win.lift()
+        SelectableMsg(win, text="Pick a backup set. Restoring REPLACES "
+                                "current lots, settings, drift log, price "
+                                "cache and the account registry.").pack(
+            padx=16, pady=(14, 6), anchor="w", fill="x")
+        menu = ctk.CTkOptionMenu(win, values=sets, width=300)
+        menu.set(sets[0])
+        menu.pack(anchor="w", padx=16, pady=4)
+        picked = {"name": sets[0]}
+
+        def _go():
+            picked["name"] = menu.get()
+            win.destroy()
+
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkButton(bar, text="Next", width=120,
+                      command=_go).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(bar, text="Cancel", width=120,
+                      command=win.destroy).pack(side="left")
+        self.wait_window(win)
+        setname = picked.get("name")
+        if not setname:
+            return
+        setdir = os.path.join(folder, setname)
+        pw = self._ask_passphrase("Restore passphrase for %s" % setname)
+        if not pw:
+            self.template_msg.configure(
+                text="Restore cancelled — current data untouched.")
+            return
+        try:
+            with open(os.path.join(setdir, "keyparams.json")) as fh:
+                keyparams = json.load(fh)
+            payloads = {}
+            for name in pc.BACKUP_DATASETS:
+                with open(os.path.join(setdir, name + ".json.enc"),
+                          "rb") as fh:
+                    payloads[name] = fh.read()
+            data = pc.backup_decrypt(keyparams, payloads, pw)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.template_msg.configure(
+                text="Restore failed: %s Current data untouched." % e)
+            return
+        finally:
+            del pw
+        # Validate EVERYTHING before touching a single file.
+        problems = pc.validate_lot_rows(data.get("lots") or [])
+        if not isinstance(data.get("profile"), dict):
+            problems.append("settings set is corrupt")
+        if not isinstance(data.get("accounts"), dict) or \
+                not isinstance(data.get("accounts", {}).get("accounts"),
+                               list):
+            problems.append("account registry set is corrupt")
+        if not isinstance(data.get("drift"), list):
+            problems.append("drift-log set is corrupt")
+        if not isinstance(data.get("prices"), dict):
+            problems.append("price-cache set is corrupt")
+        if problems:
+            shown = "\n".join(problems[:8])
+            self.template_msg.configure(
+                text="Restore failed — set invalid, current data "
+                     "untouched:\n%s" % shown)
+            return
+        today = datetime.date.today().strftime("%Y%m%d")
+        if not any(s.startswith("backup-" + today) for s in sets):
+            choice = self._confirm3(
+                "No backup from today",
+                "No backup set exists from today. Back up the current "
+                "data first, so it is recoverable?",
+                ["Back up current data first",
+                 "Restore without backing up", "Cancel"])
+            if choice == 2:
+                self.template_msg.configure(
+                    text="Restore cancelled — current data untouched.")
+                return
+            if choice == 0:
+                self.backup_now()
+                if (self.profile.get("last_backup_time") or "")[:8] \
+                        != today:
+                    self.template_msg.configure(
+                        text="Restore cancelled (backup did not "
+                             "complete) — current data untouched.")
+                    return
+        if not self._confirm(
+                "Restore backup",
+                "Restore %s?\nReplaces current lots, settings, drift "
+                "log, price cache and the account registry." % setname,
+                ok_text="Restore"):
+            self.template_msg.configure(
+                text="Restore cancelled — current data untouched.")
+            return
+        try:
+            with open(PORTFOLIO_CSV, "w", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=pc.LOT_FIELDS)
+                w.writeheader()
+                w.writerows(data["lots"])
+            prof = dict(pc.PROFILE_DEFAULTS)
+            prof.update(data["profile"])
+            prof["backup_folder"] = folder
+            prof["last_backup_time"] = today[:4] + "-" + today[4:6] + \
+                "-" + today[6:] + " (restored %s)" % setname
+            prof["last_backup_path"] = setdir
+            pc.save_profile(PROFILE_JSON, prof)
+            with open(DRIFT_LOG, "w", newline="") as fh:
+                w = csv.DictWriter(
+                    fh, fieldnames=["date", "liquid", "home",
+                                    "actual_total", "standard_total"])
+                w.writeheader()
+                w.writerows(data["drift"])
+            with open(CACHE, "w") as fh:
+                json.dump(data["prices"], fh, indent=1, sort_keys=True)
+            pc.save_accounts(ACCOUNTS_JSON,
+                             data["accounts"]["accounts"])
+        except OSError as e:
+            self.template_msg.configure(
+                text="Restore failed mid-write: %s — re-upload or "
+                     "restore an older set." % e)
+            return
+        # Reload in-memory state from the restored files (same files the
+        # features themselves read), then rebuild everything.
+        self.lots = [pc.row_to_lot(r) for r in data["lots"]]
+        self.profile = prof
+        self.accounts = pc.load_accounts(ACCOUNTS_JSON)
+        self.prices = pc.load_price_cache(CACHE)
+        self.watch = pc.load_watchlist_cache(CACHE)
+        self._sync_home()
+        self._hold_expanded = set()
+        self._liq_expanded = set()
+        self._cov_reset()
+        self.cov_filter = None
+        self.cov_guide = None
+        self.recompute()
+        self.build_all()
+        self.refresh_data_window()
+        self.template_msg.configure(
+            text="Restored %s: %s + settings + drift + prices + "
+                 "registry. Verify the numbers, then Refresh stocks."
+                 % (setname, _n(len(self.lots), "row")))
+        self.status_var.set("Restored backup %s." % setname)
 
     def download_account_template(self, account):
         path = filedialog.asksaveasfilename(
@@ -4308,8 +4777,10 @@ class App(ctk.CTk):
 
     def open_settings(self):
         # Formerly the Profile sub-tab: same fields and same save
-        # semantics, now a dialog under the ☰ menu, plus the user-set
-        # net-gains cap (blank = no cap enforced) and its note.
+        # semantics, now a dialog under the ☰ menu. Spending figures are
+        # COMPUTED (Overview radar), never entered: Settings holds only
+        # the policy inputs (Medi-Cal ceiling, other income, employer
+        # cover, insurance, AGI threshold) plus identity/property fields.
         # Fixed footer: Save/Cancel live outside the scrollable, so they
         # stay on screen at any size; the fields scroll above. Dialog
         # height never exceeds the viewport.
@@ -4337,18 +4808,21 @@ class App(ctk.CTk):
         fields = [("date_of_birth", "Date of birth (YYYY-MM or YYYY-MM-DD)"),
                   ("ss_owner_monthly", "Owner Social Security $/mo"),
                   ("ss_spouse_monthly", "Spouse Social Security $/mo"),
-                  ("spending_before65_annual",
-                   "Allowed spending $/yr before 65"),
-                  ("spending_after65_base_annual",
-                   "Allowed spending $/yr after 65 (base, before Soc Sec)"),
+                  ("magi_ceiling_annual",
+                   "Medi-Cal MAGI ceiling $/yr (blank = no cap derived)"),
+                  ("other_annual_income",
+                   "Other annual income $/yr — W-2/pension "
+                   "(blank = none)"),
+                  ("private_insurance_per_person_mo",
+                   "Private insurance $/person/mo if Medi-Cal lost"),
+                  ("after65_agi_threshold",
+                   "After-65 federal-tax-free AGI threshold $/yr"),
                   ("other_realized_gains_current_year",
                    "Other realized gains this year $ (pre-app history)"),
                   ("other_realized_gains_note", "Source note for the above"),
                   ("home_purchase_price",
                    "Home purchase price $ (optional — Holdings gain %)"),
-                  ("annual_net_gains_cap",
-                   "Annual net-gains cap $/yr (blank = no cap enforced)"),
-                  ("cap_note", "Cap reason / note (shown next to budget)")]
+                  ("cap_note", "Cap context note (shown next to budget)")]
         for key, label in fields:
             ctk.CTkLabel(body, text=label).pack(anchor="w", padx=4,
                                                 pady=(6, 0))
@@ -4357,6 +4831,14 @@ class App(ctk.CTk):
             ent.insert(0, "" if val is None else str(val))
             ent.pack(anchor="w", padx=4, pady=2)
             entries[key] = ent
+        # Employer cover is yes/no, not a number: a checkbox, saved as a
+        # bool. When on, the Medi-Cal MAGI section is not applicable.
+        employer_var = tk.BooleanVar(
+            value=bool(self.profile.get("employer_medical_cover")))
+        ctk.CTkCheckBox(body, text="Employer medical cover (Medi-Cal "
+                                   "MAGI section N/A when on)",
+                        variable=employer_var).pack(anchor="w", padx=4,
+                                                    pady=(8, 2))
         # ---- Properties: addresses live here; the RentCast key too.
         # Refresh (hamburger menu) pulls each estimate and SHOWS it —
         # nothing is replaced until the user accepts it or types a value
@@ -4438,10 +4920,26 @@ class App(ctk.CTk):
                     entries["ss_owner_monthly"].get() or 0)
                 self.profile["ss_spouse_monthly"] = float(
                     entries["ss_spouse_monthly"].get() or 0)
-                self.profile["spending_before65_annual"] = float(
-                    entries["spending_before65_annual"].get() or 0)
-                self.profile["spending_after65_base_annual"] = float(
-                    entries["spending_after65_base_annual"].get() or 0)
+                def _nblank(key):
+                    raw = entries[key].get().strip().replace(",",
+                                                             "").replace(
+                                                                 "$", "")
+                    return None if not raw else float(raw)
+
+                # Policy inputs for the computed figures. Blanks mean
+                # unset (no cap, no threshold) — never a hidden zero rule.
+                self.profile["magi_ceiling_annual"] = _nblank(
+                    "magi_ceiling_annual")
+                self.profile["other_annual_income"] = float(
+                    entries["other_annual_income"].get().strip().replace(
+                        ",", "").replace("$", "") or 0)
+                self.profile["private_insurance_per_person_mo"] = float(
+                    entries["private_insurance_per_person_mo"].get().strip(
+                    ).replace(",", "").replace("$", "") or 0)
+                self.profile["after65_agi_threshold"] = _nblank(
+                    "after65_agi_threshold")
+                self.profile["employer_medical_cover"] = bool(
+                    employer_var.get())
                 self.profile["other_realized_gains_current_year"] = float(
                     entries["other_realized_gains_current_year"].get() or 0)
                 self.profile["other_realized_gains_note"] = \
@@ -4450,20 +4948,12 @@ class App(ctk.CTk):
                 self.profile["home_purchase_price"] = \
                     "" if not home_raw else float(home_raw.replace(",", "")
                                                   .replace("$", ""))
-                cap_raw = entries["annual_net_gains_cap"].get().strip()
-                if not cap_raw:
-                    self.profile["annual_net_gains_cap"] = None
-                else:
-                    cap = float(cap_raw.replace(",", "").replace("$", ""))
-                    if cap < 0:
-                        raise ValueError
-                    self.profile["annual_net_gains_cap"] = cap
                 self.profile["cap_note"] = \
                     entries["cap_note"].get().strip()
             except ValueError:
                 msg.configure(
                     text="Settings not saved — amounts must be numbers "
-                         "(cap may be blank for no cap, never negative).")
+                         "(blank allowed only where labeled blank).")
                 return
             try:
                 new_props = []
@@ -4582,13 +5072,17 @@ class App(ctk.CTk):
                   if win.winfo_exists() else None)
 
     def _settings_summary_text(self):
-        sp = pc.spending_capacity(self.profile)
-        return ("Spending capacity (live): BEFORE 65 %s/yr · AFTER 65 "
-                "%s/yr base + SS = %s/yr all-in. Owner is %s, turns 65 "
-                "in %s. Compare against your own actual spending."
-                % (money(sp["before65"]), money(sp["after65_base"]),
-                   money(sp["after65_allin"]),
-                   "--" if sp["age"] is None else "age %d" % sp["age"],
+        sp = pc.spending_capacity(self.profile, self.lots, self.prices)
+        return ("Spending capacity (computed, as of %s): BEFORE 65 %s/yr "
+                "(pool %s ÷ %s yrs) · AFTER 65 %s/yr base (IRAs %s ÷ 20) + "
+                "SS = %s/yr all-in. Realizable this year ≈ %s. Age %s, "
+                "turns 65 in %s. Compare against your own actual spending."
+                % (sp["asof"], money(sp["before65"]), money(sp["under65"]),
+                   "--" if sp["div_years"] is None
+                   else "%d" % sp["div_years"],
+                   money(sp["after65_base"]), money(sp["ira"]),
+                   money(sp["after65_allin"]), money(sp["realizable"]),
+                   "--" if sp["age"] is None else "%d" % sp["age"],
                    sp["turns65"]))
 
     def build_data_danger(self):

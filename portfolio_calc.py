@@ -48,10 +48,15 @@ YAHOO = {"BTC": "BTC-USD", "ETH": "ETH-USD"}
 
 # Calendar-year drift baseline (Dec 30, 2025 snapshot; rolls each January —
 # update these two numbers from the new Dec snapshot tab each year).
-BASELINE_LIQUID = 3595000
-BASELINE_HOME = 931000
-BASELINE_TOTAL = BASELINE_LIQUID + BASELINE_HOME
-JAN1_PRICES = {"BTC": 87413, "GLD": 398.28, "VTI": 336.31, "MSTR": 157}
+# (Drift baselines used to live here as owner constants; they now derive
+# from the drift log — see year_baseline. Nothing user-specific in code.)
+#
+# Standard-portfolio tickers whose year-start prices feed the standard
+# YTD. No hardcoded prices or baselines anywhere: year-start prices come
+# from Yahoo history (first trading day of the year), cached per-year in
+# the price cache file; the drift baseline (total/liquid/home) comes from
+# the drift log's year-start row. Both roll every January with no edits.
+STD_START_TICKERS = ("BTC", "GLD", "VTI", "MSTR")
 
 HOME_DEFAULT = 0
 
@@ -171,6 +176,10 @@ def save_price_cache(path, prices, as_of):
             old = json.load(f)
         if isinstance(old, dict) and isinstance(old.get("watchlist"), dict):
             d["watchlist"] = old["watchlist"]
+        # Year-start prices accumulate per-year the same way: a refresh
+        # must never wipe a prior year's cached starts.
+        if isinstance(old, dict) and isinstance(old.get("year_start"), dict):
+            d["year_start"] = old["year_start"]
     except (ValueError, OSError):
         pass
     d.update({k: v for k, v in prices.items()
@@ -178,6 +187,79 @@ def save_price_cache(path, prices, as_of):
     d["as_of"] = as_of
     with open(path, "w") as f:
         json.dump(d, f, indent=1, sort_keys=True)
+
+
+def cached_year_start(cache_path, year):
+    """{ticker: year-start price} for the standard YTD, from the price
+    cache. {} when nothing cached — drift then shows unknown, never a
+    hardcoded constant."""
+    try:
+        with open(cache_path) as f:
+            d = json.load(f)
+        ys = (d.get("year_start") or {}).get(str(year)) or {}
+        return {t: ys[t] for t in STD_START_TICKERS
+                if isinstance(ys.get(t), (int, float))}
+    except (ValueError, OSError, AttributeError):
+        return {}
+
+
+def ensure_year_start(cache_path, year):
+    """Fill the cache's year-start prices once per year via Yahoo history
+    (first trading day on/after Jan 1). Called on Refresh — never in the
+    background, never on start. Never raises; a failed fetch just leaves
+    drift unknown until the next Refresh."""
+    have = cached_year_start(cache_path, year)
+    missing = [t for t in STD_START_TICKERS if t not in have]
+    if not missing or yf is None:
+        return have
+    import socket
+    prev_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(_FETCH_SOCKET_TIMEOUT)
+    try:
+        for t in missing:
+            try:
+                h = yf.Ticker(YAHOO.get(t, t)).history(
+                    start="%d-01-01" % year, end="%d-01-09" % year)
+                if len(h):
+                    have[t] = round(float(h["Close"].iloc[0]), 2)
+            except Exception:  # noqa: BLE001 - per-ticker resilience
+                pass
+    finally:
+        socket.setdefaulttimeout(prev_timeout)
+    if have:
+        try:
+            with open(cache_path) as f:
+                d = json.load(f)
+            if not isinstance(d, dict):
+                d = {}
+        except (ValueError, OSError):
+            d = {}
+        ys = d.get("year_start")
+        if not isinstance(ys, dict):
+            ys = {}
+            d["year_start"] = ys
+        ys[str(year)] = have
+        try:
+            with open(cache_path, "w") as f:
+                json.dump(d, f, indent=1, sort_keys=True)
+        except OSError:
+            pass
+    return have
+
+
+def year_baseline(rows, year):
+    """Drift baseline from the log, never from code: the first row of the
+    year, else the last row of the prior December (covers Jan 1 before any
+    row is logged). None with an empty log — a fresh copy measures
+    against nothing, never against a previous owner's numbers."""
+    jan1 = "%d-01-01" % year
+    cur = [r for r in rows if r["date"] >= jan1]
+    if cur:
+        return cur[0]
+    prior = [r for r in rows if r["date"] < jan1]
+    if prior:
+        return prior[-1]
+    return None
 
 
 def fetch_prices(tickers, cache_path, on_done=None):
@@ -630,10 +712,16 @@ def rebalance_account(positions, acct_types=None):
     return label, (acct_types or {}).get(label) in LOCKED_TYPES
 
 
-def compute(positions, prices, home_value, cost_basis=None, accounts=None):
+def compute(positions, prices, home_value, cost_basis=None, accounts=None,
+            drift_start=None, drift_baseline=None):
     """Compute all views. prices: {ticker: price}; missing -> value None.
     accounts: ordered [(bank, account, type)] union of the registry and the
-    lots (built by the caller); None derives names from positions."""
+    lots (built by the caller); None derives names from positions.
+    drift_start: {ticker: year-start price} for the standard YTD (from the
+    price cache — Yahoo history, fetched once per year on Refresh).
+    drift_baseline: the drift log's year-start row (first row of the year,
+    else last row of the prior December). Missing inputs mean unknown
+    drift ("--") — never hardcoded owner constants."""
     cost_basis = cost_basis or {}
     # Position values.
     for p in positions:
@@ -781,12 +869,18 @@ def compute(positions, prices, home_value, cost_basis=None, accounts=None):
     def ret(now, base):
         return None if (now is None or base in (None, 0)) else (now - base) / base
 
+    # Drift inputs derive, never hardcode: year-start prices from the cache,
+    # baseline totals from the log row. Missing -> unknown, not stale data.
+    start = drift_start or {}
+    base_total = (drift_baseline or {}).get("actual_total")
+    base_liquid = (drift_baseline or {}).get("liquid")
+    base_home = (drift_baseline or {}).get("home")
     rets = {
-        "BTC": ret(prices.get("BTC"), JAN1_PRICES["BTC"]),
-        "GLD": ret(prices.get("GLD"), JAN1_PRICES["GLD"]),
-        "VTI": ret(prices.get("VTI"), JAN1_PRICES["VTI"]),
-        "MSTR": ret(prices.get("MSTR"), JAN1_PRICES["MSTR"]),
-        "RE": ret(home_value, BASELINE_HOME),
+        "BTC": ret(prices.get("BTC"), start.get("BTC")),
+        "GLD": ret(prices.get("GLD"), start.get("GLD")),
+        "VTI": ret(prices.get("VTI"), start.get("VTI")),
+        "MSTR": ret(prices.get("MSTR"), start.get("MSTR")),
+        "RE": ret(home_value, base_home),
     }
     if all(v is not None for v in rets.values()):
         std_ytd = (0.15 * (0.6 * rets["BTC"] + 0.4 * rets["MSTR"])
@@ -794,16 +888,18 @@ def compute(positions, prices, home_value, cost_basis=None, accounts=None):
                    + 0.15 * (0.05 * days / 365) + 0.20 * rets["RE"])
     else:
         std_ytd = None
-    actual_ytd = (tnw - BASELINE_TOTAL) / BASELINE_TOTAL if tnw else None
+    actual_ytd = ((tnw - base_total) / base_total
+                  if (tnw and base_total) else None)
     drift_pp = None if (actual_ytd is None or std_ytd is None) \
         else actual_ytd - std_ytd
     drift = {
-        "baseline_total": BASELINE_TOTAL, "today_total": tnw,
+        "baseline_total": base_total, "today_total": tnw,
+        "baseline_liquid": base_liquid, "baseline_home": base_home,
         "actual_ytd": actual_ytd, "standard_ytd": std_ytd,
         "drift_pp": drift_pp,
-        "drift_dollar": None if drift_pp is None else drift_pp * BASELINE_TOTAL,
+        "drift_dollar": None if drift_pp is None else drift_pp * base_total,
         "standard_total": None if std_ytd is None
-        else BASELINE_TOTAL * (1 + std_ytd),
+        else base_total * (1 + std_ytd),
         "returns": rets, "days": days,
     }
     return {"positions": positions, "liquid": liquid, "tnw": tnw,
@@ -1706,16 +1802,25 @@ PROFILE_DEFAULTS = {
     "ss_spouse_monthly": 0,
     "other_realized_gains_current_year": 0.0,
     "other_realized_gains_note": "",
-    # Annual spending figures; after-65 all-in adds Social Security live.
-    "spending_before65_annual": 0,
-    "spending_after65_base_annual": 0,
+    # Spending figures are COMPUTED from live values (spending_capacity),
+    # never entered. Settings hold only the policy inputs below.
+    # Medi-Cal MAGI ceiling $/yr (program rule, not personal data).
+    "magi_ceiling_annual": 25000,
+    # Other annual income $/yr (W-2/pension). Blank/zero for none.
+    "other_annual_income": 0.0,
+    # Employer medical cover: when on, the Medi-Cal MAGI section is N/A.
+    "employer_medical_cover": False,
+    # Private insurance $/person/mo if Medi-Cal cover is lost (market
+    # fact, shown as context next to an OVER status).
+    "private_insurance_per_person_mo": 1000,
+    # After-65 federal-tax-free AGI threshold $/yr (tax rule, changes
+    # yearly — a setting so it never hardcodes).
+    "after65_agi_threshold": 63000,
     # Home purchase price (optional — Holdings shows value-only without it).
     "home_purchase_price": "",
-    # Annual net-gains cap (display-only guardrail + leeway math). BLANK
-    # default: no cap enforced until the user sets one in Settings.
-    "annual_net_gains_cap": None,
-    # Optional free-text reason shown next to the budget (e.g. the owner's
-    # Medi-Cal context lives HERE, not in hardcoded copy).
+    # The net-gains cap is DERIVED (ceiling minus other income — see
+    # gains_cap), never entered. The note stays: the user's own context
+    # (e.g. Medi-Cal) lives HERE, not in hardcoded copy.
     "cap_note": "",
     # Custom watchlist tickers (standard list is fixed content in code).
     # Legacy flat list: migrated into watchlist_classes["My watchlist"]
@@ -1783,22 +1888,194 @@ def save_accounts(path, accounts):
         json.dump({"accounts": accounts}, f, indent=1, sort_keys=True)
 
 
-def spending_capacity(prof, today=None):
-    """Live spending figures from the profile. Base annuals are user-set;
-    after-65 all-in adds both SS checks monthly."""
+# ================= encrypted backup sets =================
+# A backup set is ONE timestamped folder: keyparams.json (plaintext salt
+# + KDF iterations — salt is not secret) plus one .json.enc file per data
+# set (lots, profile, drift, prices, accounts). Plain JSON never touches
+# disk; the passphrase is never stored, never logged, never in the repo.
+BACKUP_DATASETS = ("lots", "profile", "drift", "prices", "accounts")
+BACKUP_KDF_ITERATIONS = 600000
+
+
+def _backup_fernet(passphrase, salt):
+    try:
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        import base64
+    except ImportError:
+        raise RuntimeError(
+            "Backup encryption needs the 'cryptography' package — "
+            "pip install -r requirements.txt, then back up again.")
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt,
+                     iterations=BACKUP_KDF_ITERATIONS)
+    return Fernet(base64.urlsafe_b64encode(kdf.derive(
+        str(passphrase or "").encode())))
+
+
+def backup_encrypt(datasets):
+    """Encrypt the five data sets (plain JSON-able objects) with a fresh
+    random salt. Returns (keyparams, {name: bytes}). Pure function —
+    no disk, no state, nothing stored."""
+    import os as _os
+    passphrase = datasets.pop("_passphrase", "")
+    if not passphrase:
+        raise ValueError("Backup needs a passphrase — type one in.")
+    salt = _os.urandom(16)
+    f = _backup_fernet(passphrase, salt)
+    enc = {}
+    for name in BACKUP_DATASETS:
+        raw = json.dumps(datasets.get(name),
+                         indent=1, sort_keys=True).encode()
+        enc[name] = f.encrypt(raw)
+    return ({"salt": salt.hex(),
+             "iterations": BACKUP_KDF_ITERATIONS}, enc)
+
+
+def backup_decrypt(keyparams, payloads, passphrase):
+    """Decrypt a set back to plain objects. Wrong passphrase or corrupt
+    bytes raise ValueError with a plain message — callers must treat that
+    as no-restore, leaving current data untouched."""
+    try:
+        salt = bytes.fromhex((keyparams or {}).get("salt") or "")
+    except ValueError:
+        raise ValueError("Backup set is corrupt (bad keyparams).")
+    if not salt:
+        raise ValueError("Backup set is corrupt (bad keyparams).")
+    try:
+        f = _backup_fernet(passphrase, salt)
+        out = {}
+        for name in BACKUP_DATASETS:
+            out[name] = json.loads(f.decrypt(payloads[name]).decode())
+        return out
+    except RuntimeError:
+        raise
+    except Exception:
+        raise ValueError("Wrong passphrase — or the set is corrupt. "
+                         "Current data untouched.")
+
+
+def gains_cap(prof):
+    """Derived annual net-gains cap: Medi-Cal MAGI ceiling minus other
+    annual income. None when no ceiling is set — never a hardcoded $15K."""
+    try:
+        ceiling = prof.get("magi_ceiling_annual")
+        ceiling = None if ceiling in (None, "") else float(ceiling)
+    except (ValueError, TypeError):
+        ceiling = None
+    try:
+        other = float(prof.get("other_annual_income", 0) or 0)
+    except (ValueError, TypeError):
+        other = 0.0
+    return None if ceiling is None else ceiling - other
+
+
+def spending_capacity(prof, lots=None, prices=None, today=None):
+    """Computed spending figures from live values — the radar, not a plan.
+    Before 65: non-retirement liquid accounts (savings, checking,
+    brokerages — the same under-65 pool as Liquidity) divided by whole
+    years to 65 as of Jan 1 of the current year (no IRA encashment until
+    65). After 65: retirement accounts (IRAs) divided by (85 - 65) = 20;
+    after-65 all-in adds both SS checks monthly. MAGI status and headroom
+    derive from the gains cap (ceiling minus other income). The realizable
+    figure pairs with before-65 only: cash on hand plus sales within the
+    remaining gains headroom (IRA withdrawals face income tax, not the
+    gains cap). lots/prices None -> figures None ("--", never invented)."""
     today = today or datetime.date.today()
     dob = str(prof.get("date_of_birth", ""))[:7]
     try:
         y, m = int(dob[:4]), int(dob[5:7])
         turns65 = datetime.date(y + 65, m, 1).strftime("%b %Y")
         age = today.year - y - ((today.month, today.day) < (m, 1))
+        div_years = 65 - (today.year - y)
         months_left = max((y + 65 - today.year) * 12 + (m - today.month), 0)
     except (ValueError, TypeError):
-        turns65, age, months_left = "--", None, None
-    before = float(prof.get("spending_before65_annual", 0) or 0)
-    base = float(prof.get("spending_after65_base_annual", 0) or 0)
+        turns65, age, div_years, months_left = "--", None, None, None
+    under65 = ira = cash_avail = 0.0
+    pool_value = pool_gain = 0.0
+    if lots is not None:
+        prices = prices or {}
+        for lot in lots:
+            if lot_status(lot) != "Open":
+                continue
+            atype = lot.get("account_type") or ""
+            price = prices.get(lot.get("asset"))
+            if lot.get("asset") == CASH_ASSET:
+                price = 1.0
+            if price is None:
+                continue
+            value = (lot.get("shares") or 0.0) * price
+            if atype in ("Traditional IRA", "Roth IRA"):
+                ira += value
+                continue
+            under65 += value
+            if is_cash_row(lot):
+                cash_avail += value
+            elif lot.get("cost") is not None:
+                pool_value += value
+                pool_gain += value - (lot.get("shares") or 0.0) * lot["cost"]
+    # No lots, no/invalid DOB, or already 65+: unknown ("--"). A zero
+    # pool with a valid divisor is spendable $0 (known-and-zero, "-").
+    if lots is None or not div_years or div_years <= 0:
+        before = None
+    else:
+        before = under65 / div_years
+    base = (ira / 20.0) if lots is not None else None
     ss = 12 * (float(prof.get("ss_owner_monthly", 0) or 0)
                + float(prof.get("ss_spouse_monthly", 0) or 0))
+    cap = gains_cap(prof)
+    try:
+        other = float(prof.get("other_annual_income", 0) or 0)
+    except (ValueError, TypeError):
+        other = 0.0
+    realized = None
+    if lots is not None:
+        try:
+            realized, _u, _r = realized_gains_year(
+                lots, today.year,
+                prof.get("other_realized_gains_current_year", 0) or 0.0)
+        except Exception:  # noqa: BLE001 - figures stay unknown, not crash
+            realized = None
+    magi = None if realized is None else other + realized
+    try:
+        ceiling = prof.get("magi_ceiling_annual")
+        ceiling = None if ceiling in (None, "") else float(ceiling)
+    except (ValueError, TypeError):
+        ceiling = None
+    employer_cover = bool(prof.get("employer_medical_cover"))
+    if employer_cover:
+        magi_status = "na"
+    elif magi is None or ceiling is None:
+        magi_status = "unknown"
+    else:
+        magi_status = "over" if magi > ceiling else "within"
+    headroom = None if (cap is None or realized is None) else cap - realized
+    # Realizable (before-65 pool): cash straight out, then sales within
+    # the remaining headroom at the pool's average gain ratio. Headroom
+    # exhausted -> cash only; pool at a loss -> fully realizable.
+    realizable = None
+    if lots is not None and headroom is not None:
+        if headroom <= 0:
+            realizable = cash_avail
+        elif pool_value > 0 and pool_gain > 0:
+            realizable = min(under65, cash_avail + headroom
+                             * pool_value / pool_gain)
+        else:
+            realizable = under65
+    try:
+        agi_threshold = prof.get("after65_agi_threshold")
+        agi_threshold = None if agi_threshold in (None, "") \
+            else float(agi_threshold)
+    except (ValueError, TypeError):
+        agi_threshold = None
+    agi_total = None if base is None else base + other
     return {"before65": before, "after65_base": base,
-            "after65_allin": base + ss, "turns65": turns65, "age": age,
-            "months_to_65": months_left}
+            "after65_allin": None if base is None else base + ss,
+            "turns65": turns65, "age": age, "months_to_65": months_left,
+            "div_years": div_years, "under65": under65, "ira": ira,
+            "cap": cap, "realized": realized, "headroom": headroom,
+            "magi": magi, "magi_status": magi_status, "ceiling": ceiling,
+            "other": other, "employer_cover": employer_cover,
+            "realizable": realizable, "real_cash": cash_avail,
+            "agi_threshold": agi_threshold, "agi_total": agi_total,
+            "asof": today.isoformat()}
