@@ -2388,12 +2388,18 @@ class App(ctk.CTk):
         fig1 = Figure(figsize=(10, 4.2), dpi=100)
         pc.make_allocation_chart(fig1, self.data["view3"])
         self._chart_canvas(body, fig1)
-        # Account label is data-driven — never a hardcoded name. When every
-        # sold asset sits in one IRA, name it and keep the no-tax note;
-        # otherwise stay generic (tax depends on the account used).
+        # Account label is data-driven — never a hardcoded name. When one
+        # IRA account can supply every planned sell quantity, name it and
+        # keep the no-tax note; otherwise stay generic (tax depends on the
+        # account used). Legs with no computable quantity stay out of sells
+        # (e.g. the cash-sweep leg, whose sell_sh is None).
         acct_types = {a.get("account"): (a.get("account_type") or "")
                       for a in self.account_registry()}
-        acct_label, is_ira = pc.rebalance_account(self.positions, acct_types)
+        sells = {t["sell"]: t["sell_sh"]
+                 for t in self.data["view4"]["trades"]
+                 if t.get("sell") and t.get("sell_sh") is not None}
+        acct_label, is_ira = pc.rebalance_account(self.positions, sells,
+                                                  acct_types)
         if is_ira:
             plan_note = ("REBALANCE PLAN (display only, NEVER executes "
                          "trades). All 4 trades inside %s: no tax "

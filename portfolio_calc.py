@@ -697,18 +697,31 @@ def is_negative_figure(text):
     return re.match(r"^\(\$?[\d,]+(\.\d+)?\s?(%|pp)?\)$", t) is not None
 
 
-def rebalance_account(positions, acct_types=None):
+def rebalance_account(positions, sells, acct_types=None):
     """Data-driven account label for the display-only rebalance plan.
 
-    Returns (label, is_ira): the single account holding every sold asset
-    (META/VTI/GLD) plus whether its type is an IRA; otherwise ("--",
-    False). Never a hardcoded name — a fresh copy of the app must not
-    know its first owner's account names (see the LOCKED_TYPES note)."""
-    sold = {"META", "VTI", "GLD"}
-    accts = {p["account"] for p in positions if p.get("ticker") in sold}
-    if len(accts) != 1:
+    Returns (label, is_ira): the single account whose holding of every
+    planned sell ticker covers the planned sell quantity, plus whether its
+    type is an IRA; otherwise ("--", False). sells is {ticker: planned
+    sell shares} for the sell legs only — legs with no computable quantity
+    are left out by the caller. Zero candidates, several candidates, an
+    empty sells, or a None quantity all stay generic: the plan names an
+    account only when it provably executes inside one of them. Never a
+    hardcoded name — a fresh copy of the app must not know its first
+    owner's account names (see the LOCKED_TYPES note)."""
+    sells = sells or {}
+    if not sells or any(q is None for q in sells.values()):
         return "--", False
-    label = next(iter(accts))
+    hold = {}
+    for p in positions:
+        if p.get("ticker") in sells:
+            hold.setdefault(p.get("account"), {})[p.get("ticker")] = \
+                p.get("qty") or 0.0
+    cands = [a for a, qs in hold.items()
+             if all(qs.get(t, 0.0) >= q for t, q in sells.items())]
+    if len(cands) != 1:
+        return "--", False
+    label = cands[0]
     return label, (acct_types or {}).get(label) in LOCKED_TYPES
 
 
