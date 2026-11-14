@@ -173,10 +173,15 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
   keeping a residual row; dated shares beyond the balance are rejected —
   nothing is ever silently dropped or double-counted. Correct a lot's date
   in the grid (net-change, no false draw); uploads only add or update.
-- **Upload transparency** — every upload/paste/import reports "N rows: X
-  updated (already existed), Y inserted (new)", so a duplicate upload reads
-  e.g. "31 rows: 31 updated, 0 inserted" and the dedup is visible instead
-  of wondered-about. Uploads need NOT be complete — they merge. Complete
+- **Upload transparency** — every successful upload/paste/import pops up
+  a copyable result dialog with the full detail (file, "N rows: X updated
+  (already existed), Y inserted (new)"). A duplicate upload reads e.g.
+  "Nothing new — all 31 rows already exist.", so the dedup is visible
+  instead of wondered-about. The message lines keep only the short counts
+  (the full path truncates the top status row). A successful ingest also
+  starts the same Refresh stocks worker automatically, so values appear
+  without a manual step (skipped silently when a refresh is already
+  running). Uploads need NOT be complete — they merge. Complete
   replacement = delete all data first (Danger Zone), then upload.
 - `account_type`: `Traditional IRA`, `Roth IRA`, `Taxable`, `HSA`, `Cash`.
   Cash rows (`CASH_USD`, savings) need no cost or dates.
@@ -242,8 +247,9 @@ only navigation (the ☰ menu opens no window).
   lots-only CSV for uploading into another copy of the app; defaults to your
   Downloads folder as `filled-template-YYYYMMDD-HHMM.csv`, never the repo
   folder; exports the last saved state, so unsaved Inputs edits ask Save &
-  Download / Download saved state / Cancel), **Upload** (reports "N rows:
-  X updated, Y inserted"), **Backup** (one-click ENCRYPTED backup of the
+  Download / Download saved state / Cancel), **Upload** (pops up the
+  copyable result incl. "Nothing new" on duplicates, then auto-starts
+  Refresh stocks so values appear), **Backup** (one-click ENCRYPTED backup of the
   whole data set — lots, settings, drift log, price cache, account registry
   — as a timestamped `backup-YYYYMMDD-HHMM/` set of JSON files into your
   remembered backup folder; sets accumulate, never overwritten; the folder
@@ -398,7 +404,9 @@ the brokerage.
   prices for the standard YTD come from Yahoo history (first trading day
   of the year), cached per-year in `prices_cache.json` on Refresh. Both
   roll every January with no code edits; a fresh/empty log shows unknown
-  drift, never a previous owner's numbers.
+  drift, never a previous owner's numbers. With no logged closes yet, both
+  chart copies (Overview + Diversification) show a plain "No drift data
+  yet" note in the chart's place instead of epoch-zero dates.
 - **Data files** (all gitignored, never committed): `portfolio.csv`
   (lots), `profile.json` (settings + policy inputs + user watchlist
   classes + RentCast key + properties),

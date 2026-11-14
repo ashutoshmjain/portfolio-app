@@ -1564,8 +1564,12 @@ class App(ctk.CTk):
         # The allocation bar chart lives in Diversification only.
         from matplotlib.figure import Figure
         fig = Figure(figsize=(10, 4.6), dpi=100)
-        pc.make_drift_chart(fig, pc.load_drift_log(DRIFT_LOG))
-        self._chart_canvas(body, fig)
+        if pc.make_drift_chart(fig, pc.load_drift_log(DRIFT_LOG)):
+            self._chart_canvas(body, fig)
+        else:
+            self._selectable_note(
+                body, "No drift data yet — press Log after a close to "
+                      "start the history.", padx=10, pady=6, fill="x")
         self.build_watchlist(body)
         # RESERVED: Overview bottom area below the watchlist is held for
         # the FUTURE upcoming-events calendar (earnings calls and other
@@ -2453,8 +2457,12 @@ class App(ctk.CTk):
                money(d["drift_dollar"]), money(d["standard_total"])))
         self._selectable_note(body, drift_txt, padx=6, pady=6, fill="x")
         fig2 = Figure(figsize=(10, 6.0), dpi=100)
-        pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG))
-        self._chart_canvas(body, fig2)
+        if pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG)):
+            self._chart_canvas(body, fig2)
+        else:
+            self._selectable_note(
+                body, "No drift data yet — press Log after a close to "
+                      "start the history.", padx=6, pady=6, fill="x")
 
     def build_tax(self):
         f = self._clear("Tax Harvest")
@@ -3588,6 +3596,24 @@ class App(ctk.CTk):
             return len(labels) - 1
         return result["idx"]
 
+    def _notify(self, title, text):
+        """Copyable one-click-dismiss message dialog (SelectableMsg, never
+        a native messagebox). For results the user must actually read —
+        e.g. what an upload did."""
+        win = ctk.CTkToplevel(self)
+        win.title(title)
+        win.transient(self)
+        win.resizable(False, False)
+        win.grab_set()
+        win.lift()
+        SelectableMsg(win, text=text).pack(
+            padx=16, pady=(14, 10), anchor="w", fill="x")
+        bar = ctk.CTkFrame(win, fg_color="transparent")
+        bar.pack(fill="x", padx=16, pady=(0, 14))
+        ctk.CTkButton(bar, text="OK", width=120,
+                      command=win.destroy).pack(side="left")
+        self.wait_window(win)
+
     def _cov_discard(self):
         # "Revert" never said WHAT it reverts, so it read as if saved work
         # were at risk. It discards only this session's unsaved staged
@@ -4266,11 +4292,20 @@ class App(ctk.CTk):
             return "REJECTED — nothing changed:\n%s" % "\n".join(derrs)
         updated = len(rows) - len(ins)
         self.lots = merged
-        msg = ("Ingested %s from %s: %d updated (already existed), "
-               "%d inserted (new)." % (_n(len(rows), "row"), source,
-                                       updated, len(ins)))
-        self.lots_changed_externally(msg)
-        return msg
+        # The popup carries the full detail (file + counts); the message
+        # lines keep only the short summary — the full path is what
+        # truncates the top status row, so it must not go there.
+        full, short = pc.upload_result_text(len(rows), updated, len(ins),
+                                            source)
+        self.lots_changed_externally(short)
+        # Values appear without a manual step: reuse the manual Refresh
+        # worker exactly (same fetch, progress, guard, error surfacing).
+        # Skip silently when one is already running — the guard's own
+        # status line would clobber the ingest summary.
+        if not self._refreshing:
+            self.refresh_async()
+        self._notify("Upload complete", full)
+        return short
 
     def paste_rows(self):
         try:

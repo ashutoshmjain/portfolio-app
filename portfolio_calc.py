@@ -1050,12 +1050,33 @@ def make_allocation_chart(fig, view3):
     return ax
 
 
+def upload_result_text(total, updated, inserted, source):
+    """(popup_text, short_summary) for a completed ingest. The popup
+    carries the full detail in plain words; the short summary keeps the
+    file path out of the top status row, which truncates it."""
+    rows = "1 row" if total == 1 else "%d rows" % total
+    full = ("Uploaded %s.\nIngested %s: %d updated (already existed), "
+            "%d inserted (new)." % (source, rows, updated, inserted))
+    if inserted == 0 and total > 0:
+        full += "\nNothing new — all %s already exist." % rows
+    short = ("Ingested %s: %d updated, %d inserted."
+             % (rows, updated, inserted))
+    return full, short
+
+
 def make_drift_chart(fig, log_rows):
     """Actual vs Standard daily close — Y axis EXACTLY 2M-5M, ticks every 100K.
 
     This is the chart the user left Google Sheets for: the old 0-5M axis
     flattened every wiggle into a straight line.
+
+    Returns the axes, or None when the log is empty — callers show a plain
+    note in the chart's place instead. Plotting zero rows leaves
+    matplotlib's epoch-zero (1969/1970) default ticks, which read as real
+    data; returning None keeps both copies honest.
     """
+    if not log_rows:
+        return None
     import matplotlib.dates as mdates
     dates = [datetime.date.fromisoformat(r["date"]) for r in log_rows]
     actual = [r["actual_total"] for r in log_rows]
