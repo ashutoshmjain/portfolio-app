@@ -242,33 +242,21 @@ only navigation (the ☰ menu opens no window).
   columns budget to 798px so the full grid fits a 960px split-screen window
   with no horizontal overflow; long gain strings wrap instead of clipping.
 - **Template** — row reads **Download Template | Download Data |
-  Upload | Backup | Restore | More ▾**. **Download Template** (header only),
+  Upload | More ▾**. **Download Template** (header only),
   **Download Data** (your current data, filled into the template — a plain
   lots-only CSV for uploading into another copy of the app; defaults to your
   Downloads folder as `filled-template-YYYYMMDD-HHMM.csv`, never the repo
   folder; exports the last saved state, so unsaved Inputs edits ask Save &
   Download / Download saved state / Cancel), **Upload** (pops up the
   copyable result incl. "Nothing new" on duplicates, then auto-starts
-  Refresh stocks so values appear), **Backup** (one-click ENCRYPTED backup of the
-  whole data set — lots, settings, drift log, price cache, account registry
-  — as a timestamped `backup-YYYYMMDD-HHMM/` set of JSON files into your
-  remembered backup folder; sets accumulate, never overwritten; the folder
-  must be cloud-synced — Google Drive for now — the chooser defaults to a
-  cloud root and warns on a local folder; a passphrase is asked every time
-  and never stored; wrong passphrase = unrestorable, no recovery path),
-  **Restore** (lists the timestamped sets in the backup folder — pick one,
-  retype the passphrase, confirm; EVERYTHING is decrypted and validated
-  first, so a corrupt set or wrong passphrase errors plainly with current
-  data untouched; offers to back up current data first when no set exists
-  from today; then replaces all five data files and rebuilds), and a
+  Refresh stocks so values appear), and a
   **More ▾** menu holding the secondary
   actions **Paste rows** (clipboard TSV/CSV) and **Copy AI prompt**
   (ready-made screenshot-to-CSV prompt for any AI) — no Import broker CSV:
   it duplicated Upload (both accepted only template-shaped files), so it was
   deleted and the template is the one way in. Download = save-dialog each
-  time, anywhere; backup/restore = remembered cloud folder + passphrase.
-  Upload stays CSV (the human exchange format); backup/restore are JSON
-  throughout (exact machine round-trip, encrypted with the passphrase).
+  time, anywhere. Upload stays CSV (the human exchange format). Backups
+  live in the Danger Zone tab, not here.
   The tab
   also carries a per-field broker guide (Schwab + Vanguard paths,
   CSV-export pointers, 1099-B note) plus a "Which broker export to start
@@ -316,7 +304,19 @@ only navigation (the ☰ menu opens no window).
   prices_cache.json, and accounts.json, returning the app to
   the fresh-install empty state; re-uploading restores the numbers. Needed
   because uploads upsert, never replace — delete-then-upload is the only
-  clean dataset replacement.
+  clean dataset replacement. The tab also holds ALL backup controls in
+  three rows, each with its status in front: **Set up backup folder**
+  (folder path, or "not set"), **Run Backup** (last backup time, or
+  "never" — one-click ENCRYPTED backup of the whole data set as a
+  timestamped `backup-YYYYMMDD-HHMM/` JSON set into the remembered cloud
+  folder; sets accumulate; passphrase asked every time, never stored),
+  **Restore Backup** (lists the sets — pick one, retype the passphrase,
+  confirm; everything decrypted and validated first, so a corrupt set or
+  wrong passphrase errors plainly with current data untouched; offers to
+  back up current data first when no set exists from today). Backup
+  instructions sit in the same section. The top status row wraps instead
+  of clipping, so long confirmations (e.g. the full backup folder path)
+  always show in full, at any window width.
 - **Feed one account** — the default Inputs view (see above): one taxable
   account at a time with its broker guidance and a "N required positions to
   go" countdown, then the next incomplete account. The full grid stays

@@ -383,9 +383,13 @@ class App(ctk.CTk):
         ctk.CTkButton(top, text="☰", width=44,
                       command=self.toggle_menu).pack(side="right", padx=4)
         # Selectable so every status line copies — same rule as dialogs.
+        # Word-wrapped, never clipped: the bar keeps its slim single line
+        # for short messages and grows vertically when a long one needs a
+        # second line (split-screen included) — the full text stays
+        # visible at every width instead of clipping at the window edge.
         self.status = SelectableMsg(top, textvariable=self.status_var,
-                                    text_color="orange", wrap="none")
-        self.status.pack(side="left", padx=8)
+                                    text_color="orange")
+        self.status.pack(side="left", padx=8, fill="x", expand=True)
         # Refresh progress: hidden unless a price fetch is running. The
         # ticker count is known upfront, so this is determinate (k/N) —
         # on a slow machine the bar, not silence, answers "is it stuck?".
@@ -4167,13 +4171,6 @@ class App(ctk.CTk):
                           side="left", padx=4)
         ctk.CTkButton(bar, text="Upload",
                       command=self.upload_template).pack(side="left", padx=4)
-        ctk.CTkButton(bar, text="Backup",
-                      command=self.backup_now).pack(side="left", padx=4)
-        restore_btn = ctk.CTkButton(bar, text="Restore",
-                                        command=self.restore_backup)
-        restore_btn.pack(side="left", padx=4)
-        self._tooltip(restore_btn, "Restore: pick an encrypted backup "
-                                    "set and replace current data with it.")
         self.template_more_menu = ctk.CTkOptionMenu(
             bar, values=["Paste rows", "Copy AI prompt"],
             command=self._template_more, width=110)
@@ -4182,27 +4179,10 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             f, text="Download Data: your current data, filled into the "
                    "lots-only CSV template — upload it into another copy "
-                   "of the app. Backup: one-click ENCRYPTED backup of the "
-                   "whole data set (lots, settings, drift, prices, "
-                   "registry) as JSON into your remembered cloud folder "
-                   "(passphrase asked every time, never stored). Restore: "
-                   "pick a set and replace current data with it. Upload "
-                   "stays CSV; backups are JSON throughout.",
+                   "of the app. Upload stays CSV. Backups live in the "
+                   "Danger Zone tab.",
             text_color=CLR_SECONDARY, wraplength=860,
             anchor="w").pack(padx=12, anchor="w")
-        stamp = self.profile.get("last_backup_time")
-        stamp_path = self.profile.get("last_backup_path")
-        stamp_row = ctk.CTkFrame(f, fg_color="transparent")
-        stamp_row.pack(fill="x", padx=12, pady=2)
-        ctk.CTkLabel(
-            stamp_row,
-            text=("Last backup: %s → %s" % (stamp, stamp_path)
-                  if stamp and stamp_path else "No backups yet."),
-            text_color=CLR_SECONDARY, wraplength=640,
-            anchor="w").pack(side="left")
-        ctk.CTkButton(stamp_row, text="Change backup folder", width=160,
-                      command=self.change_backup_folder).pack(side="left",
-                                                              padx=8)
         self.template_msg = SelectableMsg(f, text="")
         self.template_msg.pack(padx=8, pady=4, anchor="w")
         ctk.CTkLabel(f, text="Where to find each field at your broker:",
@@ -4361,7 +4341,7 @@ class App(ctk.CTk):
             return d
         return os.path.expanduser("~")
 
-    def _ensure_saved(self, action):
+    def _ensure_saved(self, action, msg_to=None):
         """Saved-state gate shared by download and backup: with unsaved
         Inputs edits, offer Save-first / saved-state-only / Cancel.
         Returns True when the export may proceed."""
@@ -4378,7 +4358,7 @@ class App(ctk.CTk):
         if choice == 2:
             return False
         if choice == 0 and not self._cov_save():
-            self.template_msg.configure(
+            (msg_to or self.template_msg).configure(
                 text="%s cancelled — fix the flagged rows, "
                      "then save." % action.capitalize())
             return False
@@ -4533,7 +4513,7 @@ class App(ctk.CTk):
         folder. The passphrase is asked every time, never stored.
         Backup = whole app state as encrypted JSON; Download Data stays
         the lots-only CSV exchange format."""
-        if not self._ensure_saved("back up"):
+        if not self._ensure_saved("back up", self.danger_msg):
             return
         folder = self.profile.get("backup_folder") or ""
         if not folder or not os.path.isdir(folder):
@@ -4553,7 +4533,7 @@ class App(ctk.CTk):
             self.profile["backup_folder"] = folder
         pw = self._ask_passphrase("Backup passphrase", confirm=True)
         if not pw:
-            self.template_msg.configure(
+            self.danger_msg.configure(
                 text="Backup cancelled — no passphrase, nothing written.")
             return
         drift_rows = []
@@ -4574,7 +4554,7 @@ class App(ctk.CTk):
         try:
             keyparams, enc = pc.backup_encrypt(datasets)
         except (ValueError, RuntimeError) as e:
-            self.template_msg.configure(text="Backup failed: %s" % e)
+            self.danger_msg.configure(text="Backup failed: %s" % e)
             return
         finally:
             datasets["_passphrase"] = ""
@@ -4592,13 +4572,13 @@ class App(ctk.CTk):
         except OSError as e:
             import shutil as _shutil
             _shutil.rmtree(setdir, ignore_errors=True)
-            self.template_msg.configure(text="Backup failed: %s" % e)
+            self.danger_msg.configure(text="Backup failed: %s" % e)
             return
         self.profile["last_backup_time"] = stamp[:8] + " " + stamp[9:]
         self.profile["last_backup_path"] = setdir
         pc.save_profile(PROFILE_JSON, self.profile)
         self.refresh_data_window()
-        self.template_msg.configure(
+        self.danger_msg.configure(
             text="Backed up %s + settings + drift + prices + registry "
                  "(encrypted) to %s" % (_n(len(self.lots), "row"), setdir))
 
@@ -4630,14 +4610,14 @@ class App(ctk.CTk):
         when no set exists from today."""
         folder = self.profile.get("backup_folder") or ""
         if not folder or not os.path.isdir(folder):
-            self.template_msg.configure(
-                text="No backup folder set — press Backup first (it asks "
-                     "for the folder).")
+            self.danger_msg.configure(
+                text="No backup folder set — press Set up backup folder "
+                     "above (it asks for the folder).")
             return
         sets = self._backup_sets(folder)
         if not sets:
-            self.template_msg.configure(
-                text="No backup sets in %s yet — press Backup first."
+            self.danger_msg.configure(
+                text="No backup sets in %s yet — press Run Backup above."
                 % folder)
             return
         win = ctk.CTkToplevel(self)
@@ -4672,7 +4652,7 @@ class App(ctk.CTk):
         setdir = os.path.join(folder, setname)
         pw = self._ask_passphrase("Restore passphrase for %s" % setname)
         if not pw:
-            self.template_msg.configure(
+            self.danger_msg.configure(
                 text="Restore cancelled — current data untouched.")
             return
         try:
@@ -4685,7 +4665,7 @@ class App(ctk.CTk):
                     payloads[name] = fh.read()
             data = pc.backup_decrypt(keyparams, payloads, pw)
         except (ValueError, OSError, RuntimeError) as e:
-            self.template_msg.configure(
+            self.danger_msg.configure(
                 text="Restore failed: %s Current data untouched." % e)
             return
         finally:
@@ -4704,7 +4684,7 @@ class App(ctk.CTk):
             problems.append("price-cache set is corrupt")
         if problems:
             shown = "\n".join(problems[:8])
-            self.template_msg.configure(
+            self.danger_msg.configure(
                 text="Restore failed — set invalid, current data "
                      "untouched:\n%s" % shown)
             return
@@ -4717,14 +4697,14 @@ class App(ctk.CTk):
                 ["Back up current data first",
                  "Restore without backing up", "Cancel"])
             if choice == 2:
-                self.template_msg.configure(
+                self.danger_msg.configure(
                     text="Restore cancelled — current data untouched.")
                 return
             if choice == 0:
                 self.backup_now()
                 if (self.profile.get("last_backup_time") or "")[:8] \
                         != today:
-                    self.template_msg.configure(
+                    self.danger_msg.configure(
                         text="Restore cancelled (backup did not "
                              "complete) — current data untouched.")
                     return
@@ -4733,7 +4713,7 @@ class App(ctk.CTk):
                 "Restore %s?\nReplaces current lots, settings, drift "
                 "log, price cache and the account registry." % setname,
                 ok_text="Restore"):
-            self.template_msg.configure(
+            self.danger_msg.configure(
                 text="Restore cancelled — current data untouched.")
             return
         try:
@@ -4759,7 +4739,7 @@ class App(ctk.CTk):
             pc.save_accounts(ACCOUNTS_JSON,
                              data["accounts"]["accounts"])
         except OSError as e:
-            self.template_msg.configure(
+            self.danger_msg.configure(
                 text="Restore failed mid-write: %s — re-upload or "
                      "restore an older set." % e)
             return
@@ -4779,7 +4759,7 @@ class App(ctk.CTk):
         self.recompute()
         self.build_all()
         self.refresh_data_window()
-        self.template_msg.configure(
+        self.danger_msg.configure(
             text="Restored %s: %s + settings + drift + prices + "
                  "registry. Verify the numbers, then Refresh stocks."
                  % (setname, _n(len(self.lots), "row")))
@@ -5170,6 +5150,55 @@ class App(ctk.CTk):
         self.danger_delete_btn.pack(side="left", padx=4)
         self.danger_msg = SelectableMsg(f, text="")
         self.danger_msg.pack(padx=8, pady=4, anchor="w")
+        # ---- Backups: data safety lives here with delete-all (one-path
+        # rule), not split across tabs. Three rows, each button with its
+        # status in front of it.
+        ctk.CTkLabel(
+            f, text="Backups (encrypted JSON, passphrase every time)",
+            font=ctk.CTkFont(size=FS_HEAD, weight="bold"),
+            text_color="red").pack(padx=8, pady=(12, 2), anchor="w")
+        self._selectable_note(
+            f, "One-click encrypted backup of the whole data set (lots, "
+               "settings, drift log, price cache, account registry) as a "
+               "timestamped JSON set into the remembered cloud folder — "
+               "sets accumulate, never overwritten. The passphrase is "
+               "asked every time and never stored. Upload stays CSV; "
+               "backups are JSON throughout. The folder must be "
+               "cloud-synced (Google Drive for now).",
+            padx=8, pady=4, fill="x")
+        folder = self.profile.get("backup_folder") or ""
+        setup_row = ctk.CTkFrame(f, fg_color="transparent")
+        setup_row.pack(fill="x", padx=8, pady=4)
+        SelectableMsg(
+            setup_row,
+            text=("Backup folder: %s" % folder
+                  if folder else "Backup folder: not set")).pack(
+                      side="left", padx=4, fill="x", expand=True)
+        ctk.CTkButton(setup_row, text="Set up backup folder", width=200,
+                      command=self.change_backup_folder).pack(side="left",
+                                                              padx=4)
+        stamp = self.profile.get("last_backup_time")
+        run_row = ctk.CTkFrame(f, fg_color="transparent")
+        run_row.pack(fill="x", padx=8, pady=4)
+        SelectableMsg(
+            run_row,
+            text=("Last backup: %s" % stamp
+                  if stamp else "Last backup: never")).pack(
+                      side="left", padx=4, fill="x", expand=True)
+        ctk.CTkButton(run_row, text="Run Backup", width=200,
+                      command=self.backup_now).pack(side="left", padx=4)
+        restore_row = ctk.CTkFrame(f, fg_color="transparent")
+        restore_row.pack(fill="x", padx=8, pady=4)
+        nsets = len(self._backup_sets(folder)) if folder else 0
+        SelectableMsg(
+            restore_row,
+            text=("%s in the backup folder — pick one and replace "
+                  "current data with it." % _n(nsets, "backup set")
+                  if folder else "Set a backup folder first, above.")).pack(
+                      side="left", padx=4, fill="x", expand=True)
+        ctk.CTkButton(restore_row, text="Restore Backup", width=200,
+                      command=self.restore_backup).pack(side="left",
+                                                        padx=4)
 
     def _danger_arm(self, text):
         try:
