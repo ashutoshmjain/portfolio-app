@@ -1,6 +1,6 @@
 # Prompt 11 — Type scale down (headline 18, body 12) + header title "Portfolio" + Watchlist columns (Week / Month / Quarter / PEG) + Overview value cards + Holdings cash row + Copy-table buttons right
 
-Status: DRAFT
+Status: BUILT (commit 003b580, 2026-11-18)
 
 ## Context
 
@@ -383,3 +383,90 @@ Pull the latest portfolio-app, then execute
 `prompts/muse-code-prompt-11.md` — read
 `prompts/app-style-guide.md` first, build the fifteen items, and report
 per item.
+
+## Build report (2026-11-18, commit 003b580)
+
+Per-item outcome. Committed suite 68/68 OK (46 pre-existing +
+22 new in `tests/test_prompt11.py`, checks (a)-(m)). Headless probe
+23/23 ALL PASS in a withdrawn root (no mainloop): header reads
+"Portfolio"; headline renders 18, body lines 12; four cards in one row
+with title / value / detail, no REQUIRED line, no Copy summary button;
+standard tables carry the seven headers with Week prices + 2-decimal PEG;
+REQUIRED line tops Holdings in Body style with fill=x; CASH_USD row and
+plain TOTAL present; both Copy-table buttons anchor=e. Manual GUI check
+(full + 960px split-screen) is the owner's step.
+
+1. FS_TITLE 22 -> 18 (constant + comment). Only usage is the Overview
+   headline; probe confirms it renders 18.
+2. FS_BODY 14 -> 12 (constant + comment; theme default flows everywhere).
+   Probe confirms Allowed spending / Realizable render 12.
+3. FS_HEAD 18 -> 16 (constant + comment "section headings (body + 4)");
+   headline stays largest. Header title, Watchlist, and section headings
+   follow with no call-site edits.
+4. Bullets not refonted: the declined fix is honored. (The bullet loop
+   itself is gone, replaced by the Item 11 cards; no font was added to
+   any remaining default-font note.)
+5. FS_TABLE_HEAD 14 -> 12 (constant + comment; tracks body).
+6. FS_SMALL stays 11 (untouched).
+7. Header title reads exactly "Portfolio" (text-only change; widget,
+   FS_HEAD bold font, and packing untouched; probe confirms).
+8. Style guide section 1 table + note follow the new scale (12 / 16 /
+   18 / 12 / 11; steps head = body + 4, title = body + 6, dated
+   2026-11-18); README type-scale line reads the new numbers. No rule
+   duplicated elsewhere.
+9. Watchlist Week / Month / Quarter: one `history(period="3mo")` per
+   ticker; `pick_backdate_closes` picks the close on or before each
+   target (7d / 1mo / 3mo, calendar months, day-clamped) from that pull
+   (price fallback is the same pull's last close — no 5d call, no three
+   calls). `money()`-formatted like Price; missing shows "-". Quote
+   dict + cache carry week/month/quarter with the price/mcap fallback
+   (fresh miss keeps cached). `_watch_row` returns seven values via the
+   pure `watch_row_values` helper; user-class rows share it; TSV headers
+   are the seven names. Column widths 70/90/90/90/90/110/60 + Remove 90
+   fit 960px with no horizontal scrollbar.
+10. Watchlist PEG: `pegRatio` from the same `tk.info` already fetched
+    for the market-cap fallback (no new source/fetch); 2 decimals;
+    missing (BTC, GLD, funds without one) shows "-"; cached fallback
+    like the other keys.
+11. Four value cards via one `_overview_cards` helper (transparent
+    wrapper, one equal `uniform="cards"` column per card, 20px gaps, no
+    gap after the 4th, 20px below the row; CTkFrame + three left-aligned
+    CTkLabels: FS_SMALL gray title padx=15 pady=(10,0), FS_TITLE bold
+    value padx=15, FS_SMALL gray detail padx=15 pady=(0,8)). Order:
+    Drift (drift_pp_text value, "actual x% vs standard y%" detail),
+    Medi-Cal only when activated (value Qualified / Not qualified via
+    the new `medical.card_figures` accessor — derived from projection
+    + ceiling, no sentence parsing; no empty slot when inactive),
+    Gains headroom ("-" / "no ceiling set" when unset), AGI guardrail
+    ("OVER/UNDER by $X", "$A vs $B threshold"; "-" pair when unset).
+    Cards replaced the bullet loop; the REQUIRED wording moved to
+    Holdings (Item 13). Card text is single-line by design (labels carry
+    no wraplength). Guide section 3 keep-list gains the value-card entry
+    with the stated trade-off.
+12. "Copy summary" button AND the `summary` string removed (string was
+    used only by the button — no dead code left). Summary stays
+    copyable per selectable line. Guide section 6 notes the removal
+    (2026-11-18, user's call for elegance) and the selectable-text path.
+13. REQUIRED line moved to the very top of Holdings as a `SelectableMsg`
+    with `FS_BODY` font, packed full-width (`fill="x"`); text and logic
+    unchanged via the pure `required_line_text` helper (still uses
+    `_required_missing()`; "All ..." text when nothing is missing).
+    Nothing REQUIRED renders on the Overview (comment wording adjusted
+    so the literal appears nowhere in the Overview builder).
+14. Cash is a row like any other ticker: the `holdings_by_asset` skip is
+    removed (docstring updated); cash priced at $1.00 with avg/gain
+    forced None (stored cost=1 is an amount convention, not a basis);
+    row sorts by value with the rest and is always complete (never
+    "upload" — the tooltip branch skips cash too). Cost/Gain cells
+    render "—" in the table and TSV. Its expander groups by institution
+    (bank of each lot, "?" fallback). Totals row label is exactly
+    "TOTAL" in the table and TSV; `gain_unknown` ignores the cash row
+    (cash carries no gain by design), so totals stay computable. The
+    Totals-row comment and the Holdings guidance note follow the new
+    scope. Holdings TOTAL now equals the Overview Total net worth (both
+    include positions + cash + home; verified by construction — cash was
+    already in the Overview liquid total at $1.00).
+15. Holdings + Liquidity "Copy table" buttons pack `anchor="e"`
+    (vertical positions unchanged); Table toolbar stays `sticky="e"` /
+    `side="right"` (verified, untouched). Guide section 6 gains the
+    right-edge rule as a standing style rule.
