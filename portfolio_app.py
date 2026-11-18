@@ -652,6 +652,13 @@ class App(ctk.CTk):
                 continue
             try:
                 if isinstance(w, ctk.CTkScrollableFrame):
+                    # The canvas scrollregion only refreshes on the inner
+                    # frame's <Configure> (idle layout), so a moveto issued
+                    # synchronously after a rebuild applies the old
+                    # fraction against a STALE region — after layout the
+                    # view lands mid-content with the top lines cut off.
+                    # Lay out first, then restore against the final region.
+                    w.update_idletasks()
                     w._parent_canvas.yview_moveto(y[0])
                 else:
                     w.yview_moveto(y[0])
@@ -1613,33 +1620,22 @@ class App(ctk.CTk):
         ctk.CTkLabel(body, text=real_line, wraplength=860,
                      font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2,
                                                           anchor="w")
-        # Medical plugin active: the "other" income below is the plugin's
-        # projection, not the manual lump — label it so a projection is
-        # never mistaken for the actual.
+        # Medi-Cal verdict bullet: shown ONLY when the plugin is
+        # activated — the Medi-Cal question lives in the plugin, so the
+        # Overview carries no Medi-Cal line by default. When shown, the
+        # bullet states the qualification verdict from the projection
+        # (never just the MAGI numbers); the "(projected)" suffix is gone
+        # from this line because the line itself IS the projection verdict.
         med = (self.profile.get("plugins") or {}).get("medical") or {}
         proj = " (projected)" if (med.get("enabled")
                                   and med.get("applied")) else ""
-        if sp["magi_status"] == "na":
-            magi_alert = ("Medi-Cal: employer medical cover — "
-                          "MAGI section not applicable.")
-        elif sp["magi_status"] == "within":
-            magi_alert = ("Medi-Cal MAGI %s of %s ceiling: WITHIN by %s%s."
-                          % (money(sp["magi"]), money(sp["ceiling"]),
-                             money(sp["ceiling"] - sp["magi"]), proj))
-        elif sp["magi_status"] == "over":
-            try:
-                ins = float(self.profile.get(
-                    "private_insurance_per_person_mo", 1000) or 1000)
-            except (ValueError, TypeError):
-                ins = 1000.0
-            magi_alert = ("Medi-Cal MAGI %s vs %s ceiling: OVER by %s — "
-                          "cover lost ≈ %s/yr private for two%s."
-                          % (money(sp["magi"]), money(sp["ceiling"]),
-                             money(sp["magi"] - sp["ceiling"]),
-                             money(ins * 12 * 2), proj))
-        else:
-            magi_alert = ("Medi-Cal MAGI unknown — set a ceiling in "
-                          "Settings (☰ menu).")
+        med_mod = self.plugins.get("medical")
+        try:
+            med_line = (med_mod.overview_verdict_line(self.profile)
+                        if med_mod is not None else None)
+        except Exception:  # noqa: BLE001 - a bad plugin state must not
+            # break the Overview; the plugin tab shows the fix-it text.
+            med_line = None
         if sp["headroom"] is None:
             headroom_alert = ("Gains headroom unknown — no ceiling set.")
         else:
@@ -1671,7 +1667,6 @@ class App(ctk.CTk):
             "standard %s; drift %s." % (
                 pct(d["actual_ytd"]), pct(d["standard_ytd"]),
                 drift_pp_text(d["drift_pp"])),
-            magi_alert,
             headroom_alert,
             agi_alert,
             "%d REQUIRED position%s still missing cost or dates — feed "
@@ -1679,6 +1674,12 @@ class App(ctk.CTk):
             if missing else
             "All REQUIRED positions have cost and dates.",
         ]
+        # The Medi-Cal verdict bullet sits in the old MAGI slot (second),
+        # but ONLY when the plugin is activated — otherwise no Medi-Cal
+        # line at all. Copy summary shares `alerts`, so it carries the
+        # same line automatically.
+        if med_line is not None:
+            alerts.insert(1, med_line)
         for alert in alerts:
             ctk.CTkLabel(body, text="• " + alert, wraplength=860,
                          anchor="w").pack(padx=10, pady=1, anchor="w")
@@ -5160,7 +5161,7 @@ class App(ctk.CTk):
                 return
             self.profile["rentcast_key"] = key
             # Plugin enable/disable transitions run here, before the
-            # profile is persisted, so a plugin's write-back (e.g. Medical
+            # profile is persisted, so a plugin's write-back (e.g. Medi-Cal
             # plugging its projected "other" into other_annual_income)
             # lands in the same save + recompute as everything else.
             plugins = self.profile.setdefault("plugins", {})

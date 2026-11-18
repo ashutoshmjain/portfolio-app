@@ -88,15 +88,17 @@ Refresh home estimates, Log, Settings.
   Danger Zone (see below). Profile moved to Settings under the ☰ menu
   (Refresh stocks, Refresh home estimates, Log, Settings).
 - **Utilities** (appears only when at least one plugin is enabled —
-  hidden otherwise) — one sub-tab per enabled plugin. **Medical** (base
+  hidden otherwise) — one sub-tab per enabled plugin. **Medi-Cal** (base
   version): project expected annual W-2 / pension / interest / dividends /
-  capital gains; shows the projected "other" total and the projected total
-  income. While enabled, the projected "other" plugs into the Overview's
-  MAGI and headroom (labeled "(projected)"); disabling restores the manual
-  lump value. Projected gains are display-only — the actual realized gains
-  (Tax Harvest tab) stay the source of truth. A utility is one file under
-  `plugins/` plus the loader contract — no core rewrite; a broken plugin
-  is skipped with a console note, never a startup crash.
+  capital gains; answers "Do you qualify for Medi-Cal?" with a verdict
+  from the projection against the MAGI ceiling setting. While enabled,
+  the projected "other" plugs into the Overview's headroom (labeled
+  "(projected)") and the Overview shows a Medi-Cal verdict bullet (only
+  when the plugin is activated, never by default); disabling restores the
+  manual lump value. Projected gains are display-only — the actual realized
+  gains (Tax Harvest tab) stay the source of truth. A utility is one file
+  under `plugins/` plus the loader contract — no core rewrite; a broken
+  plugin is skipped with a console note, never a startup crash.
 
 Deferred: an Overview news feed (earnings, Fed meetings) waits for the
 AI-embedding phase — raw feeds are noisy and curation is the value. No

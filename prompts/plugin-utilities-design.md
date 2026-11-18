@@ -50,7 +50,10 @@ Each plugin module exposes:
 | `PLUGIN_DESC` | One line, shown in Settings so the user knows what it does. |
 | `build(app, parent)` | Renders the plugin's UI into `parent` (its sub-tab frame). Receives the `App` instance. |
 | `on_data_changed(app)` *(optional)* | Called after upload / refresh / recompute so the plugin can refresh its display. |
+| `on_enabled(app, enabled)` *(optional)* | Called by Settings save when the plugin's enabled flag changes, before the profile is persisted — for enable/disable transitions (e.g. stashing a manual value the plugin writes over, restoring it on disable). |
 | `DEFAULT_STATE` *(optional)* | The plugin's initial state dict. |
+
+`PLUGIN_ID` is the stable key (profile state, saved data) and never changes once set; `PLUGIN_TITLE` is display-only — renaming the title (e.g. "Medical" → "Medi-Cal") needs no state migration.
 
 **What a plugin may do**
 - Read `app.lots`, `app.profile`, `app.prices`, `app.data` (the computed dict).

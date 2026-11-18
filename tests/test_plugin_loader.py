@@ -91,6 +91,13 @@ class TestDiscoverPlugins(unittest.TestCase):
         self.assertTrue(callable(med.build))
         self.assertTrue(callable(med.on_enabled))
 
+    def test_display_title_is_medical(self):
+        # PLUGIN_ID stays "medical" (state key); the user-visible title
+        # is "Medi-Cal".
+        mods, _notes = pc.discover_plugins()
+        self.assertEqual(mods["medical"].PLUGIN_ID, "medical")
+        self.assertEqual(mods["medical"].PLUGIN_TITLE, "Medi-Cal")
+
 
 if __name__ == "__main__":
     unittest.main()
