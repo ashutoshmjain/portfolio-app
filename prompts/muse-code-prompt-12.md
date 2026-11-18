@@ -1,6 +1,6 @@
 # Prompt 12 — Sidebar redesign: adopt the CustomTkinter tutorial (climate-app) layout and style; app renamed "Retirement Portfolio"
 
-Status: DRAFT
+Status: BUILT (commit 1f4651b, 2026-11-18)
 
 ## Context
 
@@ -309,6 +309,75 @@ main view (weight 1), row 0 weight 1.
   reads as one page; the Utilities page shows all plugins with
   activation on the page; a Refresh stocks click logs today's
   drift row; switching to Light mode looks right.
+
+
+## Build report (2026-11-18, commit 1f4651b)
+
+Per-item outcome. Committed suite 93/93 OK (68 pre-existing + 25 new
+in `tests/test_prompt12.py`, checks (a)-(n)). Headless probe 45/45
+ALL PASS in a withdrawn root (no mainloop): all ten entries clicked
+in order with title + accent + content each; cards contrasted and
+sized; tax tables merged; utilities page lists Medi-Cal; refresh
+auto-log writes/skips correctly; Light mode readable; 960px no
+overflow. Manual GUI check is the owner's step.
+
+1. Sidebar shell as-is: fixed 200px `corner_radius=0` frame at column
+   0, main view transparent at column 1 (root grid weights set);
+   scrollable nav; appearance + scaling + Settings at the bottom.
+   Top bar, tabs, hamburger menu, date/status labels all removed —
+   one path per page. (`_page_builder` maps each entry; `show_page`
+   accents, titles, fills actions, builds.)
+2. Sidebar subtitle, ten entries in the exact order (test (c) pins
+   the `NAV_PAGES` list).
+3. Title reads exactly "Retirement Portfolio" in window + sidebar
+   (value size); selected page recolors via the button theme pair,
+   others transparent.
+4. Appearance menu System/Light/Dark default Dark; scaling menu
+   80-120 default 100; `change_*` delegate to the tutorial handlers
+   plus a page rebuild on mode switch (theme-aware message widgets
+   pick up the new mode).
+5. Main transparent, padx/pady 20; header title title-size +
+   one gray FS_SMALL subtitle carrying "As of <date>" and the live
+   status (trace on `status_var`); per-page actions box (Overview's
+   Refresh + progress bar). Former left-pinned status/refresh/date
+   are gone.
+6. Refresh button on the Overview header only (test (g) walks all
+   ten pages); menu entries gone so no duplicate path; progress bar
+   persists in the action box.
+7. All ten builders as pages (`show_page` runs them; scroll keeping
+   unchanged; Data Entry pages excluded from current-page rebuilds;
+   `build_all` = rebuild current page).
+8. Tax merged: meaning note + type table + account table above the
+   Tax Loss Harvesting content, one scroll region, `Table` helpers,
+   no `build_taximplic` page (test (h) pins both tables + TLH).
+9. Utilities always present: Plugins tab lists every plugin with
+   enable checkbox + Save; enabled plugins get sub-tabs; pids check
+   preserves typing; Settings Utilities section + save logic removed
+   (`plugin_vars` gone — test (k)); `on_enabled` transitions fire
+   from the Utilities save.
+10. Refresh autos via `auto_log_close` (upsert by date; missing
+    standard total writes nothing + status message; Log entry and
+    `log_close` removed — test (k)). Tested pure (`append_close`
+    upsert) + through the app.
+11. "Refresh home estimates" action gone (dialog method removed);
+    home-value Settings stay; RentCast fetch code untouched with its
+    caller gone (test (k)).
+12. Table headers top-left: `Table` already left; Inputs grid header
+    and calendar weekday headers gained `anchor="w"`/`sticky="w"`
+    (test (l)); rule recorded in guide section 4.
+13. Guide: title/value sizes unchanged; tutorial mapping box added
+    to section 1; sidebar entry list replaces the Tabs lines in
+    section 7; one-page-shows-at-a-time rule in section 5; header
+    alignment rule in section 4; value-card keep-list entry moved to
+    the sidebar item; headline rule points at the title size.
+14. Theme colors: `CLR_SECONDARY = ("gray40", "gray60")`; text/panel
+    resolve from the theme pairs per mode at widget creation
+    (`_to_hex`/`_mode_is_light`/`_theme_for_mode`); cell shading is
+    the same helper with factor 1.4 dark / 0.82 light
+    (`_cell_empty_bg`); tooltip text resolves from the dark theme
+    half; zero `#EDEDED`/`#2B2B2B`/`#C9C9C9` literals in the app
+    (test (n)); Light mode renders readable with shaded Inputs
+    (probe). Guide section 2 updated to the theme pairs.
 
 ## Run line
 
