@@ -119,9 +119,9 @@ future upcoming-events calendar for portfolio holdings.)
 ## Readability (older eyes, split screen)
 
 - Type scale lives in one place (`FS_BODY` / `FS_HEAD` / `FS_TITLE` /
-  `FS_TABLE_HEAD` in `portfolio_app.py`): body 10px everywhere, headings 14px, card values 18px, bold table headers 10px. Every widget
+  `FS_TABLE_HEAD` in `portfolio_app.py`): body 14px everywhere, headings 18px, card values 18px, bold table headers 12px (the tutorial's Medium sizes). Every widget
   without an explicit font inherits body size from the theme default, so
-  buttons and entries stay usable with no per-widget edits. (CTk sizes are
+  buttons, table cells, and entries grow with no per-widget edits. (CTk sizes are
   pixels but tkinter renders points — the values are chosen to land
   exactly; don't pick odd sizes.)
 - Dark theme kept; body text is always light, secondary rows use a readable

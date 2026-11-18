@@ -1,6 +1,42 @@
 # Prompt 14 — Tutorial type scale, header net-worth subtitle, light-mode fix
 
-Status: DRAFT 2026-11-18 — awaiting the owner's yes to post.
+Status: BUILT 2026-11-18 — all three items done, whole suite 114/114
+green (run from the repo root, all test files), headless probe OK
+(withdrawn root, no mainloop). Per-item report:
+
+- Item 1 (tutorial type scale): TITLE_FONT_SIZE 26→28, FS_BODY
+  10→14, FS_HEAD 14→18, FS_TABLE_HEAD 10→12, FS_SMALL 11→12;
+  VALUE_FONT_SIZE 20 and FS_TITLE 18 unchanged. Sidebar nav text and
+  table cells grow with FS_BODY via the theme default — no per-widget
+  edits. Guide §1 table + tutorial-mapping note and README scale line
+  updated (tests a; prompt-11/12/13 scale tests updated to the new
+  contract with supersede notes).
+- Item 2 (plain subtitle label): header_net is now a plain CTkLabel
+  (text_color CLR_SECONDARY, FS_SMALL, packed side=left with
+  padx=(15, 0), pady=(6, 0)) — no box, one line, on the title's
+  baseline. The size=11 literal is gone; no numeric font size literal
+  remains in the app (tests d; prompt-11 literal test reverted to []).
+  Same live text, Overview only, other pages unchanged.
+- Item 3 (light mode): (a) _mode_is_light compares
+  case-insensitively — lowercase "light"/"dark" from
+  _get_appearance_mode and capitalized from the global getter both
+  normalize before comparing (test b); helpers untouched. (b) New
+  pc.dress_chart(fig, ax, light, panel_bg, text_color) — Dark default
+  is exactly the old look; Light sits figure+axes on the app-resolved
+  card bg with theme dark text, threaded through make_drift_chart and
+  make_allocation_chart from _chart_style in the app (test e; no
+  second palette in calc). (c) SelectableMsg.refresh_theme() added;
+  change_appearance_mode calls it on the persistent header status bar
+  (test f). Net-worth subtitle needs no step (CTkLabel).
+- Known limitation (per guardrails, not rebuilt): the Data Entry
+  pages (Inputs, Template, Danger Zone) are skipped by
+  refresh_current_page by design, so a mode switch while on one of
+  them leaves its panels at construction-time colors until the next
+  rebuild; the header, status bar, and all rebuilt pages follow
+  immediately.
+- Manual GUI check is the owner's step: full width + ~960px, Light
+  and Dark, collapse/expand, the one-line subtitle, chart controls,
+  watchlist readability in Light mode.
 
 ## Context
 

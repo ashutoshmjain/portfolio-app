@@ -54,14 +54,16 @@ class TestNavPages(unittest.TestCase):
         self.assertEqual(P.NAV_PAGES, NAV_TEN)
 
     def test_title_value_sizes(self):
-        self.assertEqual(P.TITLE_FONT_SIZE, 26)
+        # Superseded by Prompt 14 item 1: title is the tutorial
+        # heading 28; value size stays 20.
+        self.assertEqual(P.TITLE_FONT_SIZE, 28)
         self.assertEqual(P.VALUE_FONT_SIZE, 20)
 
-    def test_body_scale_prompt13(self):
-        # Superseded by Prompt 13 item 3: the compact scale is
-        # (10, 14, 10, 11) — body and headings down 2px.
+    def test_body_scale_prompt14(self):
+        # Superseded by Prompt 14 item 1: the tutorial scale is
+        # (14, 18, 12, 12).
         self.assertEqual((P.FS_BODY, P.FS_HEAD, P.FS_TABLE_HEAD,
-                          P.FS_SMALL), (10, 14, 10, 11))
+                          P.FS_SMALL), (14, 18, 12, 12))
 
     def test_secondary_theme_aware(self):
         self.assertEqual(P.CLR_SECONDARY, ("gray40", "gray60"))
@@ -226,7 +228,8 @@ class TestShellWidgets(unittest.TestCase):
         self.assertEqual(app.header_title.cget("text"), "Diversification")
         # CTk renders the requested size as pixels (Tk reports points),
         # so assert the requested size on the font object itself.
-        self.assertEqual(app.header_title.cget("font").cget("size"), 26)
+        # Superseded by Prompt 14 item 1: header title is 28.
+        self.assertEqual(app.header_title.cget("font").cget("size"), 28)
         self.assertIs(app.header_title.cget("font"), app.title_font)
         self.assertIn("As of", app.header_sub.cget("text")
                       if hasattr(app.header_sub, "cget") else "")

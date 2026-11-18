@@ -48,25 +48,23 @@ def _n(n, one, many=None):
 
 
 # ---- app-wide type scale: ONE place, not scattered per-widget values ----
-# Compact dashboard scale (2026-11-18, user's call): body 10px, headings
-# a few px above body, bold table headers at body size. Widgets without
-# an explicit font inherit FS_BODY via the theme default below, so buttons
-# and entries stay usable with no per-widget edits. NOTE: CTk sizes are
-# pixels but tkinter renders points (px * 72/96), so these are chosen to
-# land exactly: 10px -> 7.5pt -> 10px, 14px -> 10.5pt -> 14px,
-# 18px -> 13.5pt -> 18px. Body text smaller than ~11px is fine ONLY when
-# it never wraps — single-line values the eye scans, never paragraphs.
-FS_BODY = 10          # body text, everywhere
-FS_HEAD = 14          # section headings (body + 4)
-FS_TITLE = 18         # card values only (the Total net worth headline
-                      # moved into the header as small gray text)
-FS_TABLE_HEAD = 10    # bold table headers
-FS_SMALL = 11         # secondary hints only — never body text
-# Tutorial fonts, adopted as-is: the page header title + the Total net
-# worth headline use the title size; the sidebar title + value card
-# values use the value size. (Sizes in points, as the tutorial sets
-# them — the only size literals this prompt adds.)
-TITLE_FONT_SIZE = 26
+# Tutorial scale (2026-11-18, Fonts page Medium): text 14, headings
+# body + 4, small/secondary 12. Widgets without an explicit font
+# inherit FS_BODY via the theme default below, so buttons and entries
+# grow with the body size with no per-widget edits. NOTE: CTk sizes
+# are pixels but tkinter renders points (px * 72/96), so these are
+# chosen to land exactly: 14px -> 10.5pt -> 14px,
+# 18px -> 13.5pt -> 18px, 28px -> 21pt -> 28px.
+FS_BODY = 14          # body text, everywhere
+FS_HEAD = 18          # section headings (body + 4)
+FS_TITLE = 18         # card values only
+FS_TABLE_HEAD = 12    # bold table headers
+FS_SMALL = 12         # secondary hints only — never body text
+# Tutorial fonts, adopted as-is: the page header title uses the title
+# size (28, the tutorial's heading); the sidebar title + value card
+# values use the value size (20). (Sizes in points, as the tutorial
+# sets them.)
+TITLE_FONT_SIZE = 28
 VALUE_FONT_SIZE = 20
 # Theme-aware colors (light, dark) following the tutorial's GRAY_TEXT_COLOR
 # pattern. Concrete hex is read out of the theme at runtime — no hardcoded
@@ -105,12 +103,19 @@ def _to_hex(color):
 
 def _mode_is_light(widget):
     """Effective appearance mode for a widget's window. Falls back to the
-    global setting (treats System as dark) when the window is gone."""
+    global setting (treats System as dark) when the window is gone.
+
+    Compares case-insensitively: the widget-level
+    `_get_appearance_mode()` returns lowercase `"light"` / `"dark"`
+    while the global `ctk.get_appearance_mode()` returns capitalized
+    `"Light"` / `"Dark"`.
+    """
     try:
-        return widget.winfo_toplevel()._get_appearance_mode() == "Light"
+        return str(widget.winfo_toplevel()
+                   ._get_appearance_mode()).lower() == "light"
     except (tk.TclError, AttributeError):
         try:
-            return ctk.get_appearance_mode() == "Light"
+            return str(ctk.get_appearance_mode()).lower() == "light"
         except Exception:  # noqa: BLE001 - theme always answers
             return False
 
@@ -337,6 +342,7 @@ class SelectableMsg:
             except (tk.TclError, AttributeError, TypeError):
                 tkfont = None
         self._font = font
+        self._text_color = text_color
         self._box = tk.Text(parent, wrap=wrap, width=20, height=1,
                             relief="flat", borderwidth=0,
                             highlightthickness=0, bg=bg, fg=fg,
@@ -401,6 +407,25 @@ class SelectableMsg:
     def _fit_later(self):
         try:
             self._box.after_idle(self._fit)
+        except tk.TclError:
+            pass
+
+    def refresh_theme(self):
+        # Re-resolve the tk.Text colors for the current mode. CTk
+        # widgets update themselves on a mode switch, but this box
+        # sits outside the theme system (concrete hex at build time),
+        # so anything persistent across page rebuilds — the header
+        # status bar — needs this explicit refresh.
+        try:
+            light = _mode_is_light(self._box)
+            if self._text_color is None:
+                fg = _to_hex(_theme_for_mode(TEXT_COLOR, light))
+            else:
+                fg = _to_hex(_theme_for_mode(self._text_color, light)) \
+                    if isinstance(self._text_color, (tuple, list)) \
+                    else self._text_color
+            bg = _to_hex(_theme_for_mode(PANEL_COLOR, light))
+            self._box.configure(bg=bg, fg=fg, insertbackground=fg)
         except tk.TclError:
             pass
 
@@ -636,10 +661,14 @@ class App(ctk.CTk):
         self.header_title = ctk.CTkLabel(
             titlerow, text="Overview", font=self.title_font)
         self.header_title.pack(side="left")
-        self.header_net = SelectableMsg(titlerow, text="",
-                                        text_color=CLR_SECONDARY,
-                                        font=ctk.CTkFont(size=11))
-        self.header_net.pack(side="left", padx=(8, 0))
+        # Plain subtitle label, like the reference's location line: no
+        # box, one line, small and gray. A CTkLabel sizes to its text,
+        # so the figure never wraps. Small top pad puts it on the
+        # title's baseline (the reference's padx=15, pady=(6, 0)).
+        self.header_net = ctk.CTkLabel(titlerow, text="",
+                                       text_color=CLR_SECONDARY,
+                                       font=ctk.CTkFont(size=FS_SMALL))
+        self.header_net.pack(side="left", padx=(15, 0), pady=(6, 0))
         self.header_sub = SelectableMsg(hleft, text="",
                                         text_color=CLR_SECONDARY)
         self.header_sub.pack(side="left", fill="x", expand=True)
@@ -1237,7 +1266,7 @@ class App(ctk.CTk):
     def _refresh_header_net(self):
         # Total net worth beside the page title — Overview only, and only
         # with positions (the empty-state rule hides portfolio numbers at
-        # zero positions). Small gray text, same line as the title.
+        # zero positions). Small gray label, same line as the title.
         if getattr(self, "header_net", None) is None:
             return
         try:
@@ -1246,7 +1275,8 @@ class App(ctk.CTk):
                 self.header_net.configure(
                     text="Total net worth: %s"
                     % money(self.data["tnw"]))
-                self.header_net.pack(side="left", padx=(8, 0))
+                self.header_net.pack(side="left", padx=(15, 0),
+                                     pady=(6, 0))
             else:
                 self.header_net.pack_forget()
         except tk.TclError:
@@ -1289,8 +1319,15 @@ class App(ctk.CTk):
     def change_appearance_mode(self, mode):
         # Tutorial's handler, plus a page rebuild so the theme-aware
         # message widgets (tk.Text needs a concrete color) pick up the
-        # new mode's resolved colors.
+        # new mode's resolved colors. The header status bar is built
+        # once at startup and survives page rebuilds, so its colors
+        # are refreshed explicitly (the net-worth subtitle is a CTkLabel
+        # and updates itself).
         ctk.set_appearance_mode(mode)
+        try:
+            self.header_sub.refresh_theme()
+        except (tk.TclError, AttributeError):
+            pass
         self.refresh_current_page()
 
     def change_scaling(self, scaling):
@@ -1769,7 +1806,8 @@ class App(ctk.CTk):
         # controls panel (~40%) beside it, both on the shared card bg.
         from matplotlib.figure import Figure
         fig = Figure(figsize=(10, 2.5), dpi=100)
-        if pc.make_drift_chart(fig, pc.load_drift_log(DRIFT_LOG)):
+        if pc.make_drift_chart(fig, pc.load_drift_log(DRIFT_LOG),
+                               **self._chart_style(body)):
             panel = ctk.CTkFrame(body, fg_color=card_bg)
             panel.pack(fill="x", padx=10, pady=6)
             panel.grid_columnconfigure(0, weight=3)
@@ -1814,6 +1852,17 @@ class App(ctk.CTk):
             canvas.draw_idle()
         except (tk.TclError, ValueError):
             pass
+
+    def _chart_style(self, body):
+        # Mode dressing for the matplotlib figures, resolved from the
+        # theme the same way _card_bg derives the panels: the figure
+        # and axes sit on the shared card bg with theme text — light
+        # panels + dark text in Light mode, the dark look otherwise.
+        light = _mode_is_light(body)
+        return {"light": light,
+                "panel_bg": _card_bg(light),
+                "text_color": _to_hex(_theme_for_mode(TEXT_COLOR,
+                                                      light))}
 
     def _save_fig(self, fig):
         # Save-as-PNG for a chart figure: file dialog only, no redraw,
@@ -2720,7 +2769,8 @@ class App(ctk.CTk):
                      "Rebalance (buy / sell)"],
               rows).pack(fill="both", padx=6, pady=6)
         fig1 = Figure(figsize=(10, 4.2), dpi=100)
-        pc.make_allocation_chart(fig1, self.data["view3"])
+        pc.make_allocation_chart(fig1, self.data["view3"],
+                                 **self._chart_style(body))
         self._chart_canvas(body, fig1)
         # Account label is data-driven — never a hardcoded name. When one
         # IRA account can supply every planned sell quantity, name it and
@@ -2787,7 +2837,8 @@ class App(ctk.CTk):
                money(d["drift_dollar"]), money(d["standard_total"])))
         self._selectable_note(body, drift_txt, padx=6, pady=6, fill="x")
         fig2 = Figure(figsize=(10, 6.0), dpi=100)
-        if pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG)):
+        if pc.make_drift_chart(fig2, pc.load_drift_log(DRIFT_LOG),
+                               **self._chart_style(body)):
             self._chart_canvas(body, fig2)
         else:
             self._selectable_note(

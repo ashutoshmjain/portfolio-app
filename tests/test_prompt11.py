@@ -41,22 +41,20 @@ def holdings_region():
 
 class TestTypeScale(unittest.TestCase):
     def test_constants(self):
-        # Superseded by Prompt 13 item 3: the type scale drops 2px
-        # (body 12->10, headings 16->14, table headers 12->10); card
-        # values stay 18.
-        self.assertEqual(P.FS_BODY, 10)
-        self.assertEqual(P.FS_HEAD, 14)
+        # Superseded by Prompt 14 item 1 (tutorial scale): text 14,
+        # headings 18, table headers 12, small 12; card values stay 18.
+        self.assertEqual(P.FS_BODY, 14)
+        self.assertEqual(P.FS_HEAD, 18)
         self.assertEqual(P.FS_TITLE, 18)
-        self.assertEqual(P.FS_TABLE_HEAD, 10)
-        self.assertEqual(P.FS_SMALL, 11)
+        self.assertEqual(P.FS_TABLE_HEAD, 12)
+        self.assertEqual(P.FS_SMALL, 12)
 
     def test_no_numeric_sizes(self):
-        # Superseded by Prompt 13 item 9: the single allowed numeric
-        # literal is the 11px header Total net worth line. Every other
-        # size still comes from the named constants.
+        # Superseded by Prompt 14 item 2: the 11px header literal is
+        # gone with the SelectableMsg subtitle — no numeric font size
+        # literal remains anywhere.
         for src in (APP, MED):
-            self.assertEqual(re.findall(r"CTkFont\(size=(\d+)", src),
-                             ["11"] if src is APP else [])
+            self.assertEqual(re.findall(r"CTkFont\(size=(\d+)", src), [])
 
 
 class TestHeaderTitle(unittest.TestCase):

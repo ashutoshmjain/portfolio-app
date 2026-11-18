@@ -28,27 +28,27 @@ until a prompt fixes it — unless the user has said otherwise.
 
 | Constant | Size | Use |
 |---|---|---|
-| `FS_BODY` | 10 | Body text, everywhere |
-| `FS_HEAD` | 14 | Section headings |
+| `FS_BODY` | 14 | Body text, everywhere |
+| `FS_HEAD` | 18 | Section headings |
 | `FS_TITLE` | 18 | Value-card values only |
-| `FS_TABLE_HEAD` | 10, bold | Table headers |
-| `FS_SMALL` | 11 | Secondary hints only — never body text |
+| `FS_TABLE_HEAD` | 12, bold | Table headers |
+| `FS_SMALL` | 12 | Secondary hints only — never body text |
 
 (The scale changed again on 2026-11-18 by the user's call —
-Prompt 13: body 10, headings 14, table headers 10, card values 18,
-superseding the earlier 12/16/12/18. The steps are now head = body +
-4. Body text below ~11px is fine ONLY for single-line values the eye
-scans, never paragraphs.)
+Prompt 14: body 14, headings 18, table headers 12, small 12, card
+values 18, title 28, superseding the Prompt 13 compact scale. The
+steps are now head = body + 4.)
 
-> **Tutorial mapping (adopted as-is, 2026-11-18; header line moved by
-> Prompt 13).** The sidebar shell follows the climate-app tutorial's
-> layout with its own sizes: the tutorial **title size (26, bold)** is
-> used for the page header title; the tutorial **value size (20,
+> **Tutorial mapping (adopted as-is, 2026-11-18; subtitle plain by
+> Prompt 14).** The sidebar shell follows the climate-app tutorial's
+> layout with the tutorial's own sizes: the **title size (28, bold)**
+> is used for the page header title; the **value size (20,
 > bold)** is used for the "Retirement Portfolio" sidebar title AND the
-> value-card values. The Total net worth figure moved OUT of the body
-> into the header — small gray text beside the title, 11px literal at
-> the header line creation, the ONLY numeric font size this app
-> carries. Everything else uses the constants above.
+> value-card values. The Total net worth figure sits beside the title
+> as a plain small-gray `CTkLabel` in `FS_SMALL` (the reference's
+> subtitle treatment — no box, one line). There is no numeric font
+> size literal left in the app. Everything else uses the constants
+> above.
 
 - Never set a font size inline per widget; use the named constants.
 - The theme default font size is `FS_BODY`.
@@ -199,10 +199,11 @@ facts, the same way everywhere:
 
 ## 7. Headings and structure
 
-- The Total net worth figure lives in the header (small gray text
-  beside the title, Overview only — `TITLE_FONT_SIZE` no longer
-  applies to it); value-card values stay `FS_TITLE` bold. Section
-  headings `FS_HEAD` bold. Table headers `FS_TABLE_HEAD` bold.
+- The Total net worth figure lives in the header as a plain small
+  gray `CTkLabel` beside the title (Overview only, `FS_SMALL` —
+  not a `SelectableMsg`, so it never wraps into a box); value-card
+  values stay `FS_TITLE` bold. Section headings `FS_HEAD` bold.
+  Table headers `FS_TABLE_HEAD` bold.
 - Sidebar entry list (tutorial layout as-is, 2026-11-18): Overview,
   Accounts, Holdings, Liquidity, Tax, Diversification, Inputs,
   Template, Danger Zone, Utilities. Tax implications + Tax Harvest

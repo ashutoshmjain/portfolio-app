@@ -1132,33 +1132,51 @@ CHART_TEXT = "#EDEDED"
 CHART_SPINE = "#8A8A8A"
 
 
-def _darken_chart(fig, ax):
-    """Dark figure/axes + scaled-up text (titles, labels, legend, ticks)."""
-    fig.patch.set_facecolor(CHART_BG)
-    ax.set_facecolor(CHART_AXES)
+def dress_chart(fig, ax, light=False, panel_bg=None, text_color=None):
+    """Figure/axes dressing per appearance mode + scaled-up text
+    (titles, labels, legend, ticks).
+
+    Dark (the default) is exactly the old look. Light mode sits the
+    figure and axes on the panel background the caller resolved from
+    the theme (the same card bg the panels use) with dark text — the
+    palette is passed in from the app side, never hardcoded here.
+    """
+    bg = panel_bg if (light and panel_bg) else CHART_BG
+    axes_bg = panel_bg if (light and panel_bg) else CHART_AXES
+    text = text_color if (light and text_color) else CHART_TEXT
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(axes_bg)
     for spine in ax.spines.values():
         spine.set_color(CHART_SPINE)
-    ax.tick_params(colors=CHART_TEXT, labelsize=10)
+    ax.tick_params(colors=text, labelsize=10)
     ax.xaxis.label.set_size(11)
     ax.yaxis.label.set_size(11)
-    ax.xaxis.label.set_color(CHART_TEXT)
-    ax.yaxis.label.set_color(CHART_TEXT)
+    ax.xaxis.label.set_color(text)
+    ax.yaxis.label.set_color(text)
     ax.title.set_size(13)
-    ax.title.set_color(CHART_TEXT)
+    ax.title.set_color(text)
     leg = ax.get_legend()
     if leg is not None:
-        leg.get_frame().set_facecolor(CHART_AXES)
+        leg.get_frame().set_facecolor(axes_bg)
         leg.get_frame().set_edgecolor(CHART_SPINE)
         for t in leg.get_texts():
-            t.set_color(CHART_TEXT)
+            t.set_color(text)
             t.set_size(11)
 
 
-def make_allocation_chart(fig, view3):
+def _darken_chart(fig, ax):
+    """Dark dressing, kept as the default path of dress_chart."""
+    dress_chart(fig, ax)
+
+
+def make_allocation_chart(fig, view3, light=False, panel_bg=None,
+                          text_color=None):
     """Target vs Actual column chart across the 5 buckets.
 
     Caller owns the backend: headless runs set MPLBACKEND=Agg before
-    importing pyplot; the GUI uses TkAgg via FigureCanvasTkAgg.
+    importing pyplot; the GUI uses TkAgg via FigureCanvasTkAgg. The
+    mode dressing comes from the app side (same panel bg + dark text
+    the panels use in Light mode); Dark is the default look.
     """
     labels = [r["bucket"].replace(" (home, Zillow)", "") for r in view3]
     target = [r["target_pct"] * 100 for r in view3]
@@ -1177,7 +1195,8 @@ def make_allocation_chart(fig, view3):
     ax.yaxis.set_major_formatter(mticker.PercentFormatter())
     ax.legend(loc="upper right")
     ax.grid(axis="y", alpha=0.3)
-    _darken_chart(fig, ax)
+    dress_chart(fig, ax, light=light, panel_bg=panel_bg,
+                text_color=text_color)
     # Constrained layout engine (solved on every draw at the figure's real
     # size), never tight_layout(): the manual pass ran at small transient
     # startup sizes, gave up ("margins cannot be made large enough"), and
@@ -1202,11 +1221,14 @@ def upload_result_text(total, updated, inserted, source):
     return full, short
 
 
-def make_drift_chart(fig, log_rows):
+def make_drift_chart(fig, log_rows, light=False, panel_bg=None,
+                     text_color=None):
     """Actual vs Standard daily close — Y axis EXACTLY 2M-5M, ticks every 100K.
 
     This is the chart the user left Google Sheets for: the old 0-5M axis
-    flattened every wiggle into a straight line.
+    flattened every wiggle into a straight line. The mode dressing comes
+    from the app side (same panel bg + dark text the panels use in Light
+    mode); Dark is the default look.
 
     Returns the axes, or None when the log is empty — callers show a plain
     note in the chart's place instead. Plotting zero rows leaves
@@ -1239,7 +1261,8 @@ def make_drift_chart(fig, log_rows):
     ax.legend(loc="lower left")
     ax.grid(True, which="major", alpha=0.35)
     ax.grid(True, which="minor", alpha=0.12)
-    _darken_chart(fig, ax)
+    dress_chart(fig, ax, light=light, panel_bg=panel_bg,
+                text_color=text_color)
     # Constrained layout engine — see make_allocation_chart.
     fig.set_layout_engine("constrained")
     return ax

@@ -48,12 +48,13 @@ def luminance(color, light):
 
 class TestTypeScale13(unittest.TestCase):
     def test_constants(self):
-        self.assertEqual(P.FS_BODY, 10)
-        self.assertEqual(P.FS_HEAD, 14)
-        self.assertEqual(P.FS_TABLE_HEAD, 10)
-        self.assertEqual(P.FS_SMALL, 11)
+        # Superseded by Prompt 14 item 1 (tutorial scale).
+        self.assertEqual(P.FS_BODY, 14)
+        self.assertEqual(P.FS_HEAD, 18)
+        self.assertEqual(P.FS_TABLE_HEAD, 12)
+        self.assertEqual(P.FS_SMALL, 12)
         self.assertEqual(P.FS_TITLE, 18)
-        self.assertEqual(P.TITLE_FONT_SIZE, 26)
+        self.assertEqual(P.TITLE_FONT_SIZE, 28)
         self.assertEqual(P.VALUE_FONT_SIZE, 20)
         self.assertEqual(P.SIDEBAR_WIDTH, 170)
 
@@ -220,7 +221,9 @@ class TestLandingWidgets(unittest.TestCase):
         self.assertEqual(sub.pack_info()["side"], "left")
         self.assertTrue(
             sub.cget("text").startswith("Total net worth:"))
-        self.assertEqual(sub.cget("font").cget("size"), 11)
+        # Superseded by Prompt 14 item 2: the subtitle is a plain
+        # label in FS_SMALL, not an 11px SelectableMsg.
+        self.assertEqual(sub.cget("font").cget("size"), 12)
         texts = [w.get("1.0", "end-1c") for w in self.widgets(app.page)
                  if w.__class__ is tk.Text]
         self.assertFalse(any(t.startswith("Total net worth")
