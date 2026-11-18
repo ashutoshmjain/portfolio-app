@@ -1,6 +1,6 @@
 # Prompt 9 — Overview summary alignment (landing page) + Medi-Cal plugin rework (the Medi-Cal question, verdict, gains note) + stale totals fix
 
-Status: DRAFT — ready to close.
+Status: BUILT — commit `e45d6e6` on main (2026-11-18). All seven items delivered: (1) scroll-restore now lays out before `yview_moveto` (stale-region root cause of the cut-off top lines); (2) plugin renamed to "Medi-Cal" display title, id stays "medical"; (3) explainer + qualification verdict from projection vs ceiling; (4) capital-gains profit-not-proceeds note; (5) Overview Medi-Cal bullet gated on activation with verdict text, "(projected)" dropped from that line; (6) totals/verdict refresh in place via `on_data_changed` (no sub-tab rebuild); (7) design doc names `on_enabled` + id/title rule. Verified: 46/46 committed tests pass (incl. new verdict/gating/refresh tests) + 20-check headless probe ALL PASS + Prompt 8 probe green (with its `proj))` assertion updated for the superseded suffix). GUI launch-check (scroll position, sub-tab, verdict, split-screen lines) is the owner's manual step. Deferred items unchanged: submission letter, checklist, Capital Gains Forms, projected-gains MAGI hook.
 
 This prompt fixes the Overview summary alignment the user reported on the landing page, reworks the Medical plugin into the Medi-Cal question it is meant to answer, and fixes the plugin's totals not refreshing after Update. Prompt 8 is BUILT (005e1c4); this prompt builds on it.
 
