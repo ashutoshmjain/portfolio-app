@@ -1874,6 +1874,11 @@ PROFILE_DEFAULTS = {
     # last_asof}]. The applied value is what flows into Holdings, net
     # worth and drift; the last estimate is display-only until accepted.
     "properties": [],
+    # Plugin utilities: {"<id>": {"enabled": bool, ...plugin state...}}.
+    # Namespaced per plugin, all inside the profile so backup/restore and
+    # delete-all treat plugin state like any other setting. Fresh install:
+    # empty (core only, no plugin enabled).
+    "plugins": {},
 }
 
 
@@ -1891,6 +1896,61 @@ def load_profile(path):
 def save_profile(path, prof):
     with open(path, "w") as f:
         json.dump(prof, f, indent=1, sort_keys=True)
+
+
+# ================= plugin utilities (framework) =================
+# The loader: scan a plugin package directory for *.py (excluding
+# __init__.py and _*.py), import each module lazily inside try/except,
+# and keep the ones exposing the plugin interface (PLUGIN_ID,
+# PLUGIN_TITLE, PLUGIN_DESC, build; optional on_data_changed,
+# on_enabled, DEFAULT_STATE). A module that fails to import, or lacks
+# the interface, is skipped with a note — never a startup crash.
+# Pure function (no GUI): the core calls it at startup, the tests call
+# it against fixture packages.
+def discover_plugins(package="plugins", path=None):
+    """Returns ({plugin_id: module}, [notes]). `path` overrides the
+    package directory (used by tests with fixture packages)."""
+    import importlib
+    if path is None:
+        try:
+            pkg = importlib.import_module(package)
+            dirs = list(getattr(pkg, "__path__", []))
+        except Exception as e:  # noqa: BLE001 - import must never crash
+            return {}, ["plugin package %s unavailable: %s"
+                        % (package, type(e).__name__)]
+        if not dirs:
+            return {}, ["plugin package %s has no directory" % package]
+        directory = dirs[0]
+    else:
+        directory = path
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as e:
+        return {}, ["plugin directory unreadable: %s" % e]
+    mods, notes = {}, []
+    for fn in names:
+        if not fn.endswith(".py") or fn == "__init__.py" \
+                or fn.startswith("_"):
+            continue
+        stem = fn[:-3]
+        try:
+            mod = importlib.import_module("%s.%s" % (package, stem))
+        except Exception as e:  # noqa: BLE001 - broken plugin skips
+            notes.append("%s skipped (%s)" % (stem, type(e).__name__))
+            continue
+        if not all(hasattr(mod, a) for a in
+                   ("PLUGIN_ID", "PLUGIN_TITLE", "PLUGIN_DESC", "build")):
+            notes.append("%s skipped (missing interface)" % stem)
+            continue
+        pid = getattr(mod, "PLUGIN_ID")
+        if not isinstance(pid, str) or not pid:
+            notes.append("%s skipped (bad PLUGIN_ID)" % stem)
+            continue
+        if not callable(getattr(mod, "build", None)):
+            notes.append("%s skipped (build not callable)" % stem)
+            continue
+        mods[pid] = mod
+    return mods, notes
 
 
 # ================= account registry (accounts.json) =================

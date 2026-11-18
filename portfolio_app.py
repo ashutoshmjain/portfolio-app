@@ -160,6 +160,19 @@ def pct(x):
     return pc.fmt_pct(x)
 
 
+def drift_pp_text(x):
+    """Drift in percentage points (a difference of two returns, not a
+    percent): positives plain ("5.4pp"), negatives parenthesized
+    ("(5.4pp)") per the house negative style, None unknown ("--"),
+    zero "-" — same zero/negative rules as the shared formatters."""
+    if x is None:
+        return "--"
+    if x == 0:
+        return "-"
+    s = "%.1fpp" % abs(x * 100)
+    return "(%s)" % s if x < 0 else s
+
+
 class SelectableMsg:
     """Message widget with real mouse selection — a drop-in for the message
     CTkLabels it replaces (.configure(text=...)/.pack/.grid/.winfo_exists
@@ -357,6 +370,15 @@ class App(ctk.CTk):
         self.watch = pc.load_watchlist_cache(CACHE)
         self.home_value = pc.HOME_DEFAULT
         self._sync_home()
+        # Plugin utilities (additive, optional): discover at startup.
+        # A broken plugin is skipped with a console note — startup never
+        # breaks. Utilities tab state lives below with the tab bar.
+        self.plugins, self._plugin_notes = pc.discover_plugins()
+        for note in self._plugin_notes:
+            print("plugin: %s" % note)
+        self.util_tabs = None
+        self._utility_pids = None
+        self._utilities_present = False
         self.data = None
         self.cov_lots = None
         # Live scroll regions by stable key (re-registered on every build;
@@ -404,7 +426,9 @@ class App(ctk.CTk):
         self.bind_all("<Control-c>", self._copy_hotkey, add="+")
 
         # ---- Tabs ----
-        # Top level: Dashboard, Diversification, Tax Harvest, Data Entry.
+        # Top level: Dashboard, Diversification, Tax Harvest, Data Entry,
+        # plus Utilities when at least one plugin is enabled (hidden
+        # otherwise — see _sync_utility_tabs).
         # Dashboard holds Overview (landing), Accounts, Holdings, Liquidity,
         # Tax implications. Data Entry holds Inputs, Template, Danger Zone;
         # Settings lives under the hamburger menu (no Profile sub-tab).
@@ -506,6 +530,99 @@ class App(ctk.CTk):
             self._cov_reset()
         self.refresh_data_window()
 
+    def commit_profile(self, msg="Settings saved."):
+        """Profile-only commit path (Settings save, plugins): persist the
+        profile, recompute, rebuild all views. The same path the core
+        uses — plugins must not write data files directly."""
+        pc.save_profile(PROFILE_JSON, self.profile)
+        self.recompute()
+        self.build_all()
+        self.refresh_data_window()
+        self.status_var.set(msg)
+
+    # ---- plugin utilities (framework; additive, core untouched) ----
+    def _plugin_enabled(self, pid):
+        return bool((self.profile.get("plugins") or {}).get(pid, {})
+                    .get("enabled", False))
+
+    def plugin_state(self, pid):
+        """This plugin's namespaced state dict, seeded from its
+        DEFAULT_STATE on first use (user values are never overwritten by
+        the seed). Plugins should read via this, never raw profile keys."""
+        mod = self.plugins.get(pid)
+        default = getattr(mod, "DEFAULT_STATE", None) or {}
+        plugins = self.profile.setdefault("plugins", {})
+        st = plugins.setdefault(pid, {})
+        for key, val in default.items():
+            st.setdefault(key, val)
+        return st
+
+    def _sync_utility_tabs(self):
+        """Utilities tab reflects the enabled set: hidden when none is
+        enabled, one sub-tab per enabled plugin otherwise. Sub-tabs are
+        rebuilt only when the enabled set changes (so typing in a plugin
+        survives background refreshes); steady-state data updates go
+        through each plugin's optional on_data_changed hook."""
+        enabled = [(pid, mod) for pid, mod in self.plugins.items()
+                   if self._plugin_enabled(pid)]
+        pids = tuple(pid for pid, _ in enabled)
+        if not enabled:
+            if self._utilities_present:
+                try:
+                    self.tabs.delete("Utilities")
+                except (ValueError, tk.TclError):
+                    pass
+                self._utilities_present = False
+            self.util_tabs = None
+            self._utility_pids = pids
+            return
+        if not self._utilities_present:
+            try:
+                self.tabs.add("Utilities")
+            except ValueError:
+                pass  # already there; just adopt it
+            self._utilities_present = True
+            self.util_tabs = None
+        if self.util_tabs is None or pids != self._utility_pids:
+            if self.util_tabs is not None:
+                try:
+                    self.util_tabs.destroy()
+                except tk.TclError:
+                    pass
+            self.util_tabs = ctk.CTkTabview(self.tabs.tab("Utilities"))
+            self.util_tabs.pack(fill="both", expand=True, padx=4, pady=4)
+            for pid, mod in enabled:
+                try:
+                    self.util_tabs.add(mod.PLUGIN_TITLE)
+                except ValueError:
+                    pass  # duplicate title; adopt the existing sub-tab
+                frame = self.util_tabs.tab(mod.PLUGIN_TITLE)
+                for w in frame.winfo_children():
+                    w.destroy()
+                try:
+                    mod.build(self, frame)
+                except Exception as e:  # noqa: BLE001 - one plugin's
+                    # failure shows in its own sub-tab; the rest keeps
+                    # working.
+                    ctk.CTkLabel(
+                        frame,
+                        text="Plugin %s failed: %s — the rest of the "
+                             "app is unaffected."
+                        % (mod.PLUGIN_TITLE, type(e).__name__),
+                        text_color="orange", wraplength=860,
+                        anchor="w").pack(anchor="w", padx=8, pady=8)
+            self._utility_pids = pids
+            return
+        for pid, mod in enabled:
+            hook = getattr(mod, "on_data_changed", None)
+            if not callable(hook):
+                continue
+            try:
+                hook(self)
+            except Exception:  # noqa: BLE001 - same rule: a plugin's
+                # refresh failure must not break the core rebuild.
+                pass
+
     def _snap_scrolls(self, names):
         """Fractions for the named scroll regions (registry holds the live
         widgets). Fractions — not widget refs — survive the rebuild."""
@@ -587,6 +704,8 @@ class App(ctk.CTk):
         if "watchlist_names" in data and \
                 not isinstance(data["watchlist_names"], dict):
             return "'watchlist_names' must be an object"
+        if "plugins" in data and not isinstance(data["plugins"], dict):
+            return "'plugins' must be an object"
         if "rentcast_key" in data and \
                 not isinstance(data["rentcast_key"], str):
             return "'rentcast_key' must be text"
@@ -1139,6 +1258,9 @@ class App(ctk.CTk):
         self.build_taximplic()
         self.build_diversification()
         self.build_tax()
+        # Plugin utilities last: the tab reflects the enabled set, and
+        # enabled plugins get their data-changed hook.
+        self._sync_utility_tabs()
 
     def _wheel_scroll(self, event):
         # Global wheel: scroll whichever CTkScrollableFrame sits under the
@@ -1478,6 +1600,7 @@ class App(ctk.CTk):
                         else "%d" % sp["div_years"],
                         money(sp["after65_base"]), money(sp["ira"]),
                         money(sp["after65_allin"])),
+            wraplength=860,
             font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2, anchor="w")
         if sp["realizable"] is None:
             real_line = ("Realizable this year: — (set a MAGI ceiling in "
@@ -1487,16 +1610,22 @@ class App(ctk.CTk):
                          "sales within the %s gains cap)." % (
                              money(sp["realizable"]), money(sp["real_cash"]),
                              money(cap)))
-        ctk.CTkLabel(body, text=real_line,
+        ctk.CTkLabel(body, text=real_line, wraplength=860,
                      font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2,
                                                           anchor="w")
+        # Medical plugin active: the "other" income below is the plugin's
+        # projection, not the manual lump — label it so a projection is
+        # never mistaken for the actual.
+        med = (self.profile.get("plugins") or {}).get("medical") or {}
+        proj = " (projected)" if (med.get("enabled")
+                                  and med.get("applied")) else ""
         if sp["magi_status"] == "na":
             magi_alert = ("Medi-Cal: employer medical cover — "
                           "MAGI section not applicable.")
         elif sp["magi_status"] == "within":
-            magi_alert = ("Medi-Cal MAGI %s of %s ceiling: WITHIN by %s."
+            magi_alert = ("Medi-Cal MAGI %s of %s ceiling: WITHIN by %s%s."
                           % (money(sp["magi"]), money(sp["ceiling"]),
-                             money(sp["ceiling"] - sp["magi"])))
+                             money(sp["ceiling"] - sp["magi"]), proj))
         elif sp["magi_status"] == "over":
             try:
                 ins = float(self.profile.get(
@@ -1504,20 +1633,21 @@ class App(ctk.CTk):
             except (ValueError, TypeError):
                 ins = 1000.0
             magi_alert = ("Medi-Cal MAGI %s vs %s ceiling: OVER by %s — "
-                          "cover lost ≈ %s/yr private for two."
+                          "cover lost ≈ %s/yr private for two%s."
                           % (money(sp["magi"]), money(sp["ceiling"]),
                              money(sp["magi"] - sp["ceiling"]),
-                             money(ins * 12 * 2)))
+                             money(ins * 12 * 2), proj))
         else:
             magi_alert = ("Medi-Cal MAGI unknown — set a ceiling in "
                           "Settings (☰ menu).")
         if sp["headroom"] is None:
             headroom_alert = ("Gains headroom unknown — no ceiling set.")
         else:
-            headroom_alert = ("Gains headroom: %s of the %s cap%s. "
+            headroom_alert = ("Gains headroom: %s of the %s cap%s%s. "
                               "Harvesting losses increases headroom."
                               % (money(sp["headroom"]), money(cap),
-                                 " (%s)" % cap_note if cap_note else ""))
+                                 " (%s)" % cap_note if cap_note else "",
+                                 proj))
         if sp["agi_threshold"] is None or sp["agi_total"] is None:
             agi_alert = ("After-65 AGI guardrail: no threshold set — "
                          "set one in Settings.")
@@ -1533,12 +1663,14 @@ class App(ctk.CTk):
                             money(abs(sp["agi_threshold"]
                                       - sp["agi_total"]))))
         alerts = [
-            # No wrapping parens around the drift figure: the shared
-            # formatters already parenthesize negatives, so "(%s)" would
-            # render "((2.9%))" on a losing year.
-            "Drift vs standard: actual %s vs standard %s; drift %s." % (
+            # Drift defines itself in the user's words; the figure is a
+            # difference of two returns, so it renders in points
+            # ("5.4pp"), parenthesized when negative.
+            "Drift (year to date): the diff between how your portfolio "
+            "is behaving and the standard allocation — actual %s vs "
+            "standard %s; drift %s." % (
                 pct(d["actual_ytd"]), pct(d["standard_ytd"]),
-                pct(d["drift_pp"])),
+                drift_pp_text(d["drift_pp"])),
             magi_alert,
             headroom_alert,
             agi_alert,
@@ -4860,6 +4992,28 @@ class App(ctk.CTk):
                                    "MAGI section N/A when on)",
                         variable=employer_var).pack(anchor="w", padx=4,
                                                     pady=(8, 2))
+        # ---- Utilities: one row per discovered plugin. Checked = enabled.
+        # Enabling the first plugin makes the Utilities tab appear;
+        # disabling the last one hides it again (the tab bar rebuilds on
+        # save, via build_all → _sync_utility_tabs).
+        ctk.CTkLabel(body, text="Utilities",
+                     font=ctk.CTkFont(weight="bold")).pack(
+                         anchor="w", padx=4, pady=(10, 0))
+        plugin_vars = {}
+        if not self.plugins:
+            ctk.CTkLabel(
+                body, text="No utilities installed.",
+                text_color=CLR_SECONDARY).pack(anchor="w", padx=4, pady=2)
+        for pid, mod in self.plugins.items():
+            var = tk.BooleanVar(value=self._plugin_enabled(pid))
+            plugin_vars[pid] = var
+            ctk.CTkCheckBox(body, text=mod.PLUGIN_TITLE,
+                            variable=var).pack(anchor="w", padx=4,
+                                                pady=(6, 0))
+            ctk.CTkLabel(body, text=mod.PLUGIN_DESC, wraplength=540,
+                         anchor="w",
+                         text_color=CLR_SECONDARY).pack(
+                             anchor="w", padx=28, pady=(0, 2))
         # ---- Properties: addresses live here; the RentCast key too.
         # Refresh (hamburger menu) pulls each estimate and SHOWS it —
         # nothing is replaced until the user accepts it or types a value
@@ -5005,12 +5159,22 @@ class App(ctk.CTk):
                          "field above. Nothing saved.")
                 return
             self.profile["rentcast_key"] = key
-            pc.save_profile(PROFILE_JSON, self.profile)
+            # Plugin enable/disable transitions run here, before the
+            # profile is persisted, so a plugin's write-back (e.g. Medical
+            # plugging its projected "other" into other_annual_income)
+            # lands in the same save + recompute as everything else.
+            plugins = self.profile.setdefault("plugins", {})
+            for pid, mod in self.plugins.items():
+                st = plugins.setdefault(pid, {})
+                new_en = bool(plugin_vars[pid].get())
+                old_en = bool(st.get("enabled", False))
+                st["enabled"] = new_en
+                if new_en != old_en:
+                    hook = getattr(mod, "on_enabled", None)
+                    if callable(hook):
+                        hook(self, new_en)
             self._sync_home()
-            self.recompute()
-            self.build_all()
-            self.refresh_data_window()
-            self.status_var.set("Settings saved.")
+            self.commit_profile("Settings saved.")
             win.destroy()
 
         # Fixed footer: always visible and clickable without scrolling;

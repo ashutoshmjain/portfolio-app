@@ -87,6 +87,16 @@ Refresh home estimates, Log, Settings.
 - **Data Entry** (last) — sub-tabs Inputs / Template /
   Danger Zone (see below). Profile moved to Settings under the ☰ menu
   (Refresh stocks, Refresh home estimates, Log, Settings).
+- **Utilities** (appears only when at least one plugin is enabled —
+  hidden otherwise) — one sub-tab per enabled plugin. **Medical** (base
+  version): project expected annual W-2 / pension / interest / dividends /
+  capital gains; shows the projected "other" total and the projected total
+  income. While enabled, the projected "other" plugs into the Overview's
+  MAGI and headroom (labeled "(projected)"); disabling restores the manual
+  lump value. Projected gains are display-only — the actual realized gains
+  (Tax Harvest tab) stay the source of truth. A utility is one file under
+  `plugins/` plus the loader contract — no core rewrite; a broken plugin
+  is skipped with a console note, never a startup crash.
 
 Deferred: an Overview news feed (earnings, Fed meetings) waits for the
 AI-embedding phase — raw feeds are noisy and curation is the value. No
@@ -193,8 +203,10 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
   private-insurance $/person/mo + after-65 AGI threshold (the policy inputs
   the spending radar computes from — the cap itself is derived, never
   entered), the cap note, the remembered backup folder, and the last
-  backup stamp, and user-defined
-  watchlist classes. A fresh copy ships NEUTRAL blanks — no personal values
+  backup stamp, user-defined
+  watchlist classes, and plugin utilities state (`plugins`, namespaced per
+  plugin id — enabled flags plus each plugin's own inputs). A fresh copy
+  ships NEUTRAL blanks — no personal values
   are seeded in the code; the user fills these in Settings (☰ menu).
 
 ## Data Entry (last tab)
@@ -290,7 +302,10 @@ only navigation (the ☰ menu opens no window).
   Refresh popup offers an Open Settings button)
   (all blank by default — the user fills them in). Shows the computed
   spending radar (as of today): before-65 pool ÷ yrs, after-65 IRAs ÷ 20 +
-  SS = all-in, realizable figure, age, turn-65 date. Save/Cancel
+  SS = all-in, realizable figure, age, turn-65 date. A **Utilities**
+  section lists each discovered plugin (title, one-line description,
+  checkbox) — checked = enabled; enabling the first plugin makes the
+  Utilities tab appear, disabling the last one hides it. Save/Cancel
   live in a fixed footer that never scrolls away; the dialog never exceeds
   the viewport height; **Export settings** / **Import settings** in the
   footer move the whole settings file (`settings-YYYYMMDD-HHMM.json`,
