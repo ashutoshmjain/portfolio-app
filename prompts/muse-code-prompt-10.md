@@ -1,6 +1,6 @@
 # Prompt 10 — SelectableMsg everywhere + the app style guide
 
-Status: DRAFT
+Status: BUILT (commit 244a916, 2026-11-18: all nine items built, probe 43/43 ALL PASS, suite 46/46 OK; manual launch-check pending per guardrails - Overview left-edge alignment full + 960px, Data Entry heading one row, empty cells lighter, computed cells greyed)
 
 ## Context
 
