@@ -124,12 +124,12 @@ future upcoming-events calendar for portfolio holdings.)
   standard) and the key readout notes are real selectable text: drag to
   select, Ctrl+C to copy.
 - Counts use plain plurals ("1 row", "11 positions") — no "(s)" anywhere.
+- New UI text and new UI code both go through the standing rules before any new file: the rules live in `prompts/app-style-guide.md`.
 
 ## Readability (older eyes, split screen)
 
 - Type scale lives in one place (`FS_BODY` / `FS_HEAD` / `FS_TITLE` /
-  `FS_TABLE_HEAD` in `portfolio_app.py`): body 16px everywhere, headings
-  20px, headline numbers 24px, bold table headers 16px. Every widget
+  `FS_TABLE_HEAD` in `portfolio_app.py`): body 14px everywhere, headings 18px, headline numbers 22px, bold table headers 14px. Every widget
   without an explicit font inherits body size from the theme default, so
   buttons and entries are legible with no per-widget edits. (CTk sizes are
   pixels but tkinter renders points — the values are chosen to land

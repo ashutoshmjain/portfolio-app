@@ -248,6 +248,9 @@ def build(app, parent):
     """Render the Medi-Cal sub-tab. Idempotent: the core clears `parent`
     before calling it, so this renders fresh from saved state every time.
     Widget refs for the totals/verdict refresh live on app._medical_ui."""
+    # Deferred: the core imports this plugin at startup, so importing the
+    # shared message widget + type scale at module top would be circular.
+    from portfolio_app import FS_BODY, FS_HEAD, SelectableMsg
     st = _state(app)
     ceiling = _ceiling(app.profile)
     if ceiling is None:
@@ -260,54 +263,58 @@ def build(app, parent):
                      "medical and dental care (Denti-Cal) for people "
                      "whose income (MAGI) is below the ceiling (below %s "
                      "a year)." % pc.fmt_usd(ceiling))
-    ctk.CTkLabel(parent, text="Medi-Cal — projected income (base)",
-                 font=ctk.CTkFont(size=20, weight="bold")).pack(
-                     anchor="w", padx=8, pady=(8, 2))
-    ctk.CTkLabel(parent, text=explainer, wraplength=860,
-                 anchor="w").pack(anchor="w", padx=8, pady=(0, 4))
-    ctk.CTkLabel(parent, text="Project expected (not actual) annual income "
-                              "per component. The Overview uses this "
-                              "projection (income marked projected there)."
-                              if st.get("applied") else
-                              "Project expected (not actual) annual income "
-                              "per component. Not applied — press Update "
-                              "projection to plug it in.",
-                 wraplength=860, anchor="w").pack(
-                     anchor="w", padx=8, pady=(0, 4))
+    SelectableMsg(parent, text="Medi-Cal — projected income (base)",
+                  font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
+                      anchor="w", padx=8, pady=(8, 2), fill="x")
+    SelectableMsg(parent, text=explainer,
+                  anchor="w").pack(anchor="w", padx=8, pady=(0, 4),
+                                   fill="x")
+    SelectableMsg(parent, text="Project expected (not actual) annual income "
+                               "per component. The Overview uses this "
+                               "projection (income marked projected there)."
+                               if st.get("applied") else
+                               "Project expected (not actual) annual income "
+                               "per component. Not applied — press Update "
+                               "projection to plug it in.",
+                  anchor="w").pack(anchor="w", padx=8, pady=(0, 4),
+                                   fill="x")
     entries = {}
     for key, label in FIELDS:
-        ctk.CTkLabel(parent, text=label).pack(anchor="w", padx=8,
-                                              pady=(6, 0))
+        SelectableMsg(parent, text=label).pack(
+            anchor="w", padx=8, pady=(6, 0), fill="x")
         ent = ctk.CTkEntry(parent, width=200)
         ent.insert(0, "" if st.get(key) is None else str(st.get(key)))
         ent.pack(anchor="w", padx=8, pady=2)
         entries[key] = ent
         if key == "gains":
-            ctk.CTkLabel(
+            SelectableMsg(
                 parent,
                 text="Capital gains are the profit on a sale, not the "
                      "amount you sold. Example: selling $100,000 of stock "
                      "you bought for $100,000 gives $0 capital gains.",
-                wraplength=860, anchor="w",
-                text_color="gray").pack(anchor="w", padx=8, pady=(0, 2))
+                anchor="w",
+                text_color="gray").pack(anchor="w", padx=8, pady=(0, 2),
+                                        fill="x")
     totals, verdict = _readout_texts(app)
-    totals_w = ctk.CTkLabel(parent, text=totals, wraplength=860,
-                            anchor="w")
-    totals_w.pack(anchor="w", padx=8, pady=(8, 2))
-    verdict_w = ctk.CTkLabel(parent, text=verdict, wraplength=860,
-                             font=ctk.CTkFont(size=18, weight="bold"),
-                             anchor="w")
-    verdict_w.pack(anchor="w", padx=8, pady=(0, 2))
+    totals_w = SelectableMsg(parent, text=totals,
+                               anchor="w")
+    totals_w.pack(anchor="w", padx=8, pady=(8, 2), fill="x")
+    verdict_w = SelectableMsg(parent, text=verdict,
+                              font=ctk.CTkFont(size=FS_BODY,
+                                               weight="bold"),
+                              anchor="w")
+    verdict_w.pack(anchor="w", padx=8, pady=(0, 2), fill="x")
     app._medical_ui = {"totals": totals_w, "verdict": verdict_w}
-    ctk.CTkLabel(parent, text="Projected gains are shown for the "
-                              "forward-looking picture only — the core's "
-                              "actual realized gains (Tax Harvest tab) "
-                              "stay the source of truth.",
-                 wraplength=860, anchor="w",
-                 text_color="gray").pack(anchor="w", padx=8, pady=(0, 4))
-    msg = ctk.CTkLabel(parent, text="", text_color="orange",
-                       wraplength=860, anchor="w")
-    msg.pack(anchor="w", padx=8, pady=4)
+    SelectableMsg(parent, text="Projected gains are shown for the "
+                                 "forward-looking picture only — the core's "
+                                 "actual realized gains (Tax Harvest tab) "
+                                 "stay the source of truth.",
+                  anchor="w",
+                  text_color="gray").pack(anchor="w", padx=8, pady=(0, 4),
+                                          fill="x")
+    msg = SelectableMsg(parent, text="", text_color="orange",
+                        anchor="w")
+    msg.pack(anchor="w", padx=8, pady=4, fill="x")
     ctk.CTkButton(parent, text="Update projection", width=200,
                   command=lambda: _update_from_entries(
                       app, entries, msg)).pack(anchor="w", padx=8, pady=4)

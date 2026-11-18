@@ -48,22 +48,44 @@ def _n(n, one, many=None):
 
 
 # ---- app-wide type scale: ONE place, not scattered per-widget values ----
-# Retirement-planner audience skews older: body text >= 15px everywhere,
-# headings a few px above body, bold table headers >= 15px. Widgets without
-# an explicit font inherit FS_BODY via the theme default below, so buttons
-# and entries are legible with no per-widget edits. NOTE: CTk sizes are
-# pixels but tkinter renders points (px * 72/96), so these are chosen to
-# land exactly: 16px -> 12pt -> 16px, 20px -> 15pt -> 20px,
-# 24px -> 18pt -> 24px. Do NOT pick odd values — rounding would shave a
-# pixel off the 15px minimum.
-FS_BODY = 16          # body text minimum, everywhere
-FS_HEAD = 20          # section headings (body + 4)
-FS_TITLE = 24         # top headline numbers
-FS_TABLE_HEAD = 16    # bold table headers
-FS_SMALL = 13         # secondary hints only — never body text
+# Retirement-planner audience skews older: everything sits a touch above
+# the minimum — body 14px (floor 13px), headings a few px above body,
+# bold table headers at body size. Widgets without an explicit font
+# inherit FS_BODY via the theme default below, so buttons and entries are
+# legible with no per-widget edits. NOTE: CTk sizes are pixels but tkinter
+# renders points (px * 72/96), so these are chosen to land exactly:
+# 14px -> 10.5pt -> 14px, 18px -> 13.5pt -> 18px, 22px -> 16.5pt -> 22px.
+# Body text smaller than the ~13px floor is fine ONLY when it never wraps
+# — single-line values the eye scans, never paragraphs.
+FS_BODY = 14          # body text, everywhere
+FS_HEAD = 18          # section headings (body + 4)
+FS_TITLE = 22         # top headline numbers
+FS_TABLE_HEAD = 14    # bold table headers
+FS_SMALL = 11         # secondary hints only — never body text
 # Secondary text on dark: light enough to read at body size (never tiny +
 # dim). Body text itself is always the default light color, never this.
 CLR_SECONDARY = "#C9C9C9"
+
+
+def _lighter(hex_color, factor=1.4):
+    """Lighten a #RRGGBB color by factor, channel-clamped.
+
+    Empty editable cells derive their shade from the panel bg instead of
+    hardcoding a new palette color — one derivation, every grid cell.
+    """
+    h = hex_color.lstrip("#")
+    try:
+        r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return hex_color
+    r, g, b = (min(255, int(c * factor)) for c in (r, g, b))
+    return "#%02X%02X%02X" % (r, g, b)
+
+
+# Empty editable cell: the dark panel bg (#2B2B2B, the canvas every grid
+# row sits on) lightened one step. Filled cells read normal; filled
+# display-only cells grey out via CLR_SECONDARY instead of a bg shade.
+CELL_EMPTY_BG = _lighter("#2B2B2B")
 ctk.ThemeManager.theme["CTkFont"]["size"] = FS_BODY
 # Minimum canvas width (px) before a chart may lay out and draw. At cold
 # start the canvas reports transient near-zero widths while the window is
@@ -185,8 +207,12 @@ class SelectableMsg:
     shortcuts stay live. A textvariable (status bar) is mirrored live.
     """
 
+    # anchor is accepted and ignored: the app's paragraph labels already
+    # pack with anchor="w", and sharing call sites with CTkLabel means some
+    # conversions carry anchor= along — silently accepting it keeps each
+    # conversion one line.
     def __init__(self, parent, text="", text_color=None, wraplength=None,
-                 font=None, textvariable=None, wrap="word"):
+                 font=None, textvariable=None, wrap="word", anchor=None):
         fg = {"orange": "orange", "red": "red"}.get(
             text_color, "#EDEDED" if text_color is None else text_color)
         tkfont = None
@@ -199,7 +225,8 @@ class SelectableMsg:
         self._box = tk.Text(parent, wrap=wrap, width=20, height=1,
                             relief="flat", borderwidth=0,
                             highlightthickness=0, bg="#2B2B2B", fg=fg,
-                            cursor="xterm", font=tkfont or ("Roboto", -16),
+                            cursor="xterm",
+                            font=tkfont or ("Roboto", -FS_BODY),
                             spacing1=2, spacing3=4,
                             insertbackground="#EDEDED")
         self._text = ""
@@ -396,10 +423,10 @@ class App(ctk.CTk):
         # narrow split-screen window never chops them) ----
         top = ctk.CTkFrame(self)
         top.pack(fill="x", padx=10, pady=8)
-        ctk.CTkLabel(top, text="PORTFOLIO DASHBOARD",
-                     font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
-                         side="left", padx=8)
-        self.date_lbl = ctk.CTkLabel(
+        SelectableMsg(top, text="PORTFOLIO DASHBOARD",
+                      font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
+                          side="left", padx=8)
+        self.date_lbl = SelectableMsg(
             top, text="As of %s" % datetime.date.today().isoformat())
         self.date_lbl.pack(side="left", padx=8)
         ctk.CTkButton(top, text="☰", width=44,
@@ -604,13 +631,14 @@ class App(ctk.CTk):
                 except Exception as e:  # noqa: BLE001 - one plugin's
                     # failure shows in its own sub-tab; the rest keeps
                     # working.
-                    ctk.CTkLabel(
+                    SelectableMsg(
                         frame,
                         text="Plugin %s failed: %s — the rest of the "
                              "app is unaffected."
                         % (mod.PLUGIN_TITLE, type(e).__name__),
-                        text_color="orange", wraplength=860,
-                        anchor="w").pack(anchor="w", padx=8, pady=8)
+                        text_color="orange",
+                        anchor="w").pack(anchor="w", padx=8, pady=8,
+                                         fill="x")
             self._utility_pids = pids
             return
         for pid, mod in enabled:
@@ -1073,8 +1101,8 @@ class App(ctk.CTk):
         win.title("Refresh home estimates")
         win.transient(self)
         win.resizable(False, False)
-        ctk.CTkLabel(win, text="Latest home value estimate:").pack(
-            padx=12, pady=(12, 2), anchor="w")
+        SelectableMsg(win, text="Latest home value estimate:").pack(
+            padx=12, pady=(12, 2), anchor="w", fill="x")
         # Fetches per property and SHOWS the pulled value + source +
         # date — it never silently replaces anything. The user accepts the
         # pulled value or overwrites the applied value manually (e.g. after
@@ -1083,11 +1111,10 @@ class App(ctk.CTk):
         # app start.
         props = self._properties()
         if not props:
-            ctk.CTkLabel(
+            SelectableMsg(
                 win, text="No properties yet — add one in Settings "
                           "(Properties), then Refresh.",
-                wraplength=360, anchor="w").pack(padx=12, pady=12,
-                                                anchor="w")
+                anchor="w").pack(padx=12, pady=12, anchor="w", fill="x")
             ctk.CTkButton(win, text="Close",
                           command=win.destroy).pack(padx=12, pady=(0, 12),
                                                    fill="x")
@@ -1099,11 +1126,11 @@ class App(ctk.CTk):
         for p in props:
             box = ctk.CTkFrame(win, fg_color="transparent")
             box.pack(fill="x", padx=12, pady=4)
-            ctk.CTkLabel(
+            SelectableMsg(
                 box, text=(p.get("address") or "(no address)").strip() or
                 "(no address)",
                 font=ctk.CTkFont(weight="bold"),
-                wraplength=380, anchor="w").pack(anchor="w")
+                anchor="w").pack(anchor="w", fill="x")
             line = ctk.CTkFrame(box, fg_color="transparent")
             line.pack(fill="x", pady=2)
             ctk.CTkLabel(line, text="Applied $").pack(side="left")
@@ -1425,49 +1452,22 @@ class App(ctk.CTk):
         widget.bind("<Enter>", show, add="+")
         widget.bind("<Leave>", hide, add="+")
 
-    def _selectable_note(self, parent, text, bg="#2B2B2B", **pack_kw):
+    def _selectable_note(self, parent, text, **pack_kw):
         """Read-only, mouse-selectable text block (real selection + Ctrl+C).
 
-        A borderless tk.Text that auto-heights to its wrapped lines and
-        refits on resize. Typing/paste/cut are blocked; navigation,
-        selection and Control shortcuts (copy, select-all) work.
+        Thin wrapper over the shared SelectableMsg class — one widget
+        implementation for every selectable note, not a per-tab duplicate.
         """
         # width=20: wrapping (not requested width) decides the layout, so
-        # this block can never widen a split-screen interior itself.
-        box = tk.Text(parent, wrap="word", width=20, height=2, relief="flat",
-                      borderwidth=0, highlightthickness=0, bg=bg,
-                      fg="#EDEDED", cursor="xterm",
-                      font=("Roboto", -FS_BODY), spacing1=2, spacing3=4,
-                      insertbackground="#EDEDED")
-        box.insert("1.0", text)
-
-        def _ro_key(e):
-            if e.state & 0x4:  # Control held: copy, select-all, etc.
-                return None
-            if e.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
-                            "Prior", "Next"):
-                return None
-            return "break"
-
-        box.bind("<KeyPress>", _ro_key, add="+")
-        for seq in ("<<Cut>>", "<<Paste>>"):
-            box.bind(seq, lambda e: "break", add="+")
-
-        def _fit(_e=None):
-            try:
-                n = box.count("1.0", "end", "displaylines")
-                h = max(1, (n[0] if n else 1))
-                if int(box.cget("height")) != h:
-                    box.configure(height=h)
-            except tk.TclError:
-                pass
-
-        box.bind("<Configure>", _fit, add="+")
+        # this block can never widen a split-screen interior itself. Every
+        # note packs with fill="x": the widget expands to the container
+        # width and refits its height to the wrapped lines.
+        msg = SelectableMsg(parent, text=text,
+                            font=ctk.CTkFont(size=FS_BODY))
         if not pack_kw:
             pack_kw = {"padx": 8, "pady": 4, "anchor": "w", "fill": "x"}
-        box.pack(**pack_kw)
-        box.after_idle(_fit)
-        return box
+        msg.pack(**pack_kw)
+        return msg
 
     def _required_missing(self):
         return sum(
@@ -1569,12 +1569,12 @@ class App(ctk.CTk):
             # DATA-DRIVEN empty state: zero positions means no numbers, no
             # chart, no alerts — a home-only net worth or a vacuous
             # "all complete" would mislead. Same panel after delete-all.
-            ctk.CTkLabel(
+            SelectableMsg(
                 body, text="No data yet — add your first bank / account, "
                            "or upload a filled template.",
                 font=ctk.CTkFont(size=FS_HEAD, weight="bold"),
-                wraplength=860, anchor="w").pack(padx=10, pady=(24, 8),
-                                                anchor="w")
+                anchor="w").pack(padx=10, pady=(24, 8), anchor="w",
+                                 fill="x")
             ctk.CTkButton(body, text="Add your first bank / account",
                           width=240,
                           command=self._cov_add_account).pack(
@@ -1593,10 +1593,12 @@ class App(ctk.CTk):
         cap = sp["cap"]
         cap_note = (self.profile.get("cap_note") or "").strip()
         missing = self._required_missing()
-        ctk.CTkLabel(body, text="Total net worth: %s" % money(tnw),
-                     font=ctk.CTkFont(size=FS_TITLE, weight="bold")).pack(
-                         padx=10, pady=(10, 2), anchor="w")
-        ctk.CTkLabel(
+        SelectableMsg(body, text="Total net worth: %s" % money(tnw),
+                      font=ctk.CTkFont(size=FS_TITLE,
+                                       weight="bold")).pack(
+                                           padx=10, pady=(10, 2),
+                                           anchor="w", fill="x")
+        SelectableMsg(
             body, text="Allowed spending (as of %s; prices/home at last "
                     "refresh): %s/yr before 65 (pool %s ÷ %s yrs) · "
                     "%s/yr after 65 (IRAs %s ÷ 20; + Social Security "
@@ -1607,8 +1609,8 @@ class App(ctk.CTk):
                         else "%d" % sp["div_years"],
                         money(sp["after65_base"]), money(sp["ira"]),
                         money(sp["after65_allin"])),
-            wraplength=860,
-            font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2, anchor="w")
+            font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2, anchor="w",
+                                                fill="x")
         if sp["realizable"] is None:
             real_line = ("Realizable this year: — (set a MAGI ceiling in "
                          "Settings so headroom can derive).")
@@ -1617,9 +1619,9 @@ class App(ctk.CTk):
                          "sales within the %s gains cap)." % (
                              money(sp["realizable"]), money(sp["real_cash"]),
                              money(cap)))
-        ctk.CTkLabel(body, text=real_line, wraplength=860,
-                     font=ctk.CTkFont(size=FS_BODY)).pack(padx=10, pady=2,
-                                                          anchor="w")
+        SelectableMsg(body, text=real_line,
+                      font=ctk.CTkFont(size=FS_BODY)).pack(
+                          padx=10, pady=2, anchor="w", fill="x")
         # Medi-Cal verdict bullet: shown ONLY when the plugin is
         # activated — the Medi-Cal question lives in the plugin, so the
         # Overview carries no Medi-Cal line by default. When shown, the
@@ -1681,8 +1683,8 @@ class App(ctk.CTk):
         if med_line is not None:
             alerts.insert(1, med_line)
         for alert in alerts:
-            ctk.CTkLabel(body, text="• " + alert, wraplength=860,
-                         anchor="w").pack(padx=10, pady=1, anchor="w")
+            SelectableMsg(body, text="• " + alert, anchor="w").pack(
+                padx=10, pady=1, anchor="w", fill="x")
         summary = ("Total net worth: %s\n"
                    "Allowed spending (as of %s): %s/yr before 65 · "
                    "%s/yr after 65 (+ Social Security = %s).\n"
@@ -1749,9 +1751,9 @@ class App(ctk.CTk):
         # Standard classes are fixed content in code; user-defined classes
         # persist in profile.json and clear on delete-all. Watchlist first,
         # the reserved events calendar goes below it when built.
-        ctk.CTkLabel(body, text="Watchlist",
-                     font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
-                         padx=10, pady=(10, 2), anchor="w")
+        SelectableMsg(body, text="Watchlist",
+                      font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
+                          padx=10, pady=(10, 2), anchor="w", fill="x")
         for name, tickers in self.watch_classes():
             standard = name in pc.WATCHLIST_CLASSES
             self._watch_class_section(body, name, tickers, standard)
@@ -1777,9 +1779,9 @@ class App(ctk.CTk):
         # no add/remove path targets the standard classes.
         head = ctk.CTkFrame(body, fg_color="transparent")
         head.pack(fill="x", padx=10, pady=(6, 0))
-        ctk.CTkLabel(head, text=self._watch_class_title(name, tickers),
-                     font=ctk.CTkFont(size=FS_BODY,
-                                      weight="bold")).pack(side="left")
+        SelectableMsg(head, text=self._watch_class_title(name, tickers),
+                      font=ctk.CTkFont(size=FS_BODY,
+                                       weight="bold")).pack(side="left")
         if standard:
             ctk.CTkLabel(head, text="standard",
                          text_color=CLR_SECONDARY).pack(side="left", padx=8)
@@ -2108,7 +2110,7 @@ class App(ctk.CTk):
         ctk.CTkButton(f, text="Copy table", width=110,
                       command=lambda: self._copy_holdings(rows)
                       ).pack(padx=6, pady=(6, 0), anchor="w")
-        ctk.CTkLabel(
+        SelectableMsg(
             f, text="Averages and gains show only when every open lot has "
                     "cost — otherwise Avg reads upload (hover for the "
                     "missing count) and gains read --. The table is a "
@@ -2117,7 +2119,7 @@ class App(ctk.CTk):
                     "(value only unless a purchase price is set in "
                     "Settings). "
                     "Click ▶ on a row for its per-account breakdown.",
-            wraplength=860, anchor="w").pack(padx=6, pady=6, anchor="w")
+            anchor="w").pack(padx=6, pady=6, anchor="w", fill="x")
 
     def _copy_holdings(self, rows):
         lines = ["\t".join(["Asset", "Total shares", "Avg purchase price",
@@ -2234,11 +2236,11 @@ class App(ctk.CTk):
         # accounts appear here after Save (Issue 4c): this builder runs on
         # every recompute, so no view ever serves a stale list.
         if not self.account_registry():
-            ctk.CTkLabel(
+            SelectableMsg(
                 f, text="No accounts yet — add your first bank / account.",
                 font=ctk.CTkFont(size=FS_HEAD, weight="bold"),
-                wraplength=860, anchor="w").pack(padx=10, pady=(24, 8),
-                                                 anchor="w")
+                anchor="w").pack(padx=10, pady=(24, 8), anchor="w",
+                                 fill="x")
             ctk.CTkButton(f, text="Add your first bank / account",
                           width=240,
                           command=self._cov_add_account).pack(
@@ -2302,11 +2304,11 @@ class App(ctk.CTk):
         f = self._clear_dash("Liquidity")
         if getattr(self, "_liq_expanded", None) is None:
             self._liq_expanded = set()
-        ctk.CTkLabel(
+        SelectableMsg(
             f, text="Access to funds — what you can reach now, and what "
                     "unlocks penalty-free at 59½.",
             font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
-                padx=6, pady=(6, 2), anchor="w")
+                padx=6, pady=(6, 2), anchor="w", fill="x")
         banks = pc.liquidity_by_bank(self.lots, self.prices)
         ctk.CTkButton(f, text="Copy table", width=110,
                       command=lambda: self._copy_liquidity(banks)
@@ -2471,12 +2473,12 @@ class App(ctk.CTk):
             # Empty state (same rule as Overview/Accounts): zero positions
             # means no numbers, no chart, no rebalance plan — a fresh copy
             # must not show the previous owner's account names or sizing.
-            ctk.CTkLabel(
+            SelectableMsg(
                 body, text="No data yet — add your first bank / account, "
                            "or upload a filled template.",
                 font=ctk.CTkFont(size=FS_HEAD, weight="bold"),
-                wraplength=860, anchor="w").pack(padx=10, pady=(24, 8),
-                                                anchor="w")
+                anchor="w").pack(padx=10, pady=(24, 8), anchor="w",
+                                 fill="x")
             ctk.CTkButton(body, text="Add your first bank / account",
                           width=240,
                           command=self._cov_add_account).pack(
@@ -2603,9 +2605,9 @@ class App(ctk.CTk):
 
     def build_tax(self):
         f = self._clear("Tax Harvest")
-        ctk.CTkLabel(f, text="Tax Loss Harvesting",
-                     font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
-                         padx=6, pady=(6, 0), anchor="w")
+        SelectableMsg(f, text="Tax Loss Harvesting",
+                      font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
+                          padx=6, pady=(6, 0), anchor="w", fill="x")
         # One scroll region for the view: all tables full-height inside.
         body = ctk.CTkScrollableFrame(f)
         self._scroll_keep["tax"] = body
@@ -2796,9 +2798,9 @@ class App(ctk.CTk):
                         t["holdings_ok"], t["holdings_n"], t["cost_ok"],
                         t["cost_n"], t["acq_ok"], t["acq_n"]),
             font=ctk.CTkFont(size=FS_BODY, weight="bold"))
-        self.cov_progress.pack(anchor="w", padx=8)
+        self.cov_progress.pack(anchor="w", padx=8, fill="x")
         self.cov_warn = SelectableMsg(f, text="", text_color="orange")
-        self.cov_warn.pack(padx=8, anchor="w")
+        self.cov_warn.pack(padx=8, anchor="w", fill="x")
         if self.cov_guide:
             self._cov_guide_panel(f)
         else:
@@ -2819,16 +2821,16 @@ class App(ctk.CTk):
                    "table has a Copy table button.",
                 padx=8, pady=2, fill="x")
         if not self.cov_lots:
-            ctk.CTkLabel(
+            SelectableMsg(
                 f, text="No accounts yet.",
                 font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
-                    padx=8, pady=(24, 4))
+                    padx=8, pady=(24, 4), anchor="w", fill="x")
             ctk.CTkButton(f, text="Add your first bank / account",
                           width=240,
                           command=self._cov_add_account).pack(padx=8, pady=8)
-            ctk.CTkLabel(
+            SelectableMsg(
                 f, text="Or upload a filled template in the Template sub-tab.",
-                wraplength=600).pack(padx=8, pady=4)
+                anchor="w").pack(padx=8, pady=4, anchor="w", fill="x")
             self._cov_refresh_chrome()
             return
         scroll = ctk.CTkScrollableFrame(f)
@@ -2844,9 +2846,10 @@ class App(ctk.CTk):
             if self.cov_filter and not any(
                     a == self.cov_filter for a in groups[bank]):
                 continue
-            ctk.CTkLabel(scroll, text=bank,
-                         font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
-                             padx=6, pady=(10, 2), anchor="w")
+            SelectableMsg(scroll, text=bank,
+                          font=ctk.CTkFont(size=FS_HEAD,
+                                           weight="bold")).pack(
+                               padx=6, pady=(10, 2), anchor="w", fill="x")
             for acct in sorted(groups[bank]):
                 if self.cov_filter and acct != self.cov_filter:
                     continue
@@ -2870,12 +2873,12 @@ class App(ctk.CTk):
                  "COMPLETE": "green"}.get(flag, "gray")
         head = ctk.CTkFrame(box, fg_color="transparent")
         head.pack(fill="x", padx=6, pady=4)
-        ctk.CTkLabel(head, text=acct,
-                     font=ctk.CTkFont(weight="bold")).pack(side="left",
-                                                           padx=4)
+        SelectableMsg(head, text=acct,
+                      font=ctk.CTkFont(weight="bold")).pack(side="left",
+                                                             padx=4)
         ctk.CTkLabel(head, text="[ %s ]" % flag,
                      text_color=color).pack(side="left", padx=4)
-        self.cov_widgets.setdefault("acctval", {})[acct] = ctk.CTkLabel(
+        self.cov_widgets.setdefault("acctval", {})[acct] = SelectableMsg(
             head, text="")
         self.cov_widgets["acctval"][acct].pack(side="left", padx=8)
         menu = ctk.CTkOptionMenu(
@@ -2901,9 +2904,10 @@ class App(ctk.CTk):
         for st, title in (("Open", None), ("Closed", "Closed")):
             sub = [r for r in rows if pc.lot_status(r) == st]
             if st == "Closed" and sub:
-                ctk.CTkLabel(box, text="Closed",
-                             font=ctk.CTkFont(weight="bold")).pack(
-                                 padx=12, pady=(6, 0), anchor="w")
+                SelectableMsg(box, text="Closed",
+                              font=ctk.CTkFont(weight="bold")).pack(
+                                  padx=12, pady=(6, 0), anchor="w",
+                                  fill="x")
             for row in sub:
                 self._cov_row(box, row)
         ctk.CTkButton(box, text="+ Add row", width=100,
@@ -3469,6 +3473,42 @@ class App(ctk.CTk):
                 continue
             orig, is_new = self._cov_orig_field(row, field)
             menu_mark(menu, is_new or row.get(field) != orig)
+        # Cell states (style guide §4): two independent facts — value?
+        # editable? Unlocked rows are editable: empty cells take the
+        # lighter shade (derived from the panel bg) so the eye finds what
+        # still needs filling; filled cells read normal. Locked rows are
+        # display: filled cells grey out (muted text), empty cells read
+        # normal (nothing to enter, nothing to show). CTkLabels (math,
+        # cash_note, marker) are readonly text — no shade. Borders (red
+        # invalid / gold changed) are never touched here.
+        locked = bool(row.get("_locked", True))
+        entry_fg = W.get("entry_fg_def")
+        entry_tx = W.get("entry_tx_def")
+        for key in ("bank", "shares", "cost", "acquired", "sold_date",
+                    "sale_price", "account_new", "asset_new"):
+            widget = W.get(key)
+            if widget is None:
+                continue
+            var = W.get(key + "_var")
+            try:
+                empty = not (var.get().strip() if var is not None else "")
+            except tk.TclError:
+                continue
+            try:
+                if locked:
+                    if entry_fg is not None:
+                        widget.configure(fg_color=entry_fg)
+                    if empty:
+                        if entry_tx is not None:
+                            widget.configure(text_color=entry_tx)
+                    else:
+                        widget.configure(text_color=CLR_SECONDARY)
+                else:
+                    widget.configure(
+                        fg_color=CELL_EMPTY_BG if empty else "white",
+                        text_color="black")
+            except (tk.TclError, ValueError):
+                pass
         # live row arithmetic: implied totals, never a recompute
         sh, co = row.get("shares"), row.get("cost")
         parts = []
@@ -3844,7 +3884,8 @@ class App(ctk.CTk):
         body.pack(fill="both", expand=True, padx=14, pady=14)
         banks = sorted({r.get("bank") for r in self.cov_lots
                         if r.get("bank")})
-        ctk.CTkLabel(body, text="Bank / Brokerage").pack(anchor="w", padx=4)
+        SelectableMsg(body, text="Bank / Brokerage").pack(
+            anchor="w", padx=4, fill="x")
         bank_menu = ctk.CTkOptionMenu(body, width=260,
                                       values=banks + ["< new >"])
         if banks:
@@ -3855,25 +3896,25 @@ class App(ctk.CTk):
         if not banks:
             bank_menu.set("< new >")
             bank_ent.pack(anchor="w", padx=4, pady=2)
-        ctk.CTkLabel(body, text="Account name").pack(anchor="w", padx=4,
-                                                     pady=(8, 0))
+        SelectableMsg(body, text="Account name").pack(
+            anchor="w", padx=4, pady=(8, 0), fill="x")
         acct_var = tk.StringVar()
         ctk.CTkEntry(body, width=260, textvariable=acct_var).pack(
             anchor="w", padx=4, pady=2)
-        ctk.CTkLabel(body, text="Account type (drives whether cost/dates "
+        SelectableMsg(body, text="Account type (drives whether cost/dates "
                                 "are required)").pack(anchor="w", padx=4,
-                                                      pady=(8, 0))
+                                                      pady=(8, 0), fill="x")
         type_menu = ctk.CTkOptionMenu(body, values=pc.ACCOUNT_TYPES,
                                       width=260)
         type_menu.set("Taxable")
         type_menu.pack(anchor="w", padx=4, pady=2)
-        ctk.CTkLabel(body, text="First lot — asset").pack(anchor="w", padx=4,
-                                                          pady=(8, 0))
+        SelectableMsg(body, text="First lot — asset").pack(
+            anchor="w", padx=4, pady=(8, 0), fill="x")
         asset_var = tk.StringVar()
         ctk.CTkEntry(body, width=260, textvariable=asset_var).pack(
             anchor="w", padx=4, pady=2)
-        ctk.CTkLabel(body, text="First lot — shares").pack(anchor="w",
-                                                           padx=4, pady=(8, 0))
+        SelectableMsg(body, text="First lot — shares").pack(
+            anchor="w", padx=4, pady=(8, 0), fill="x")
         shares_var = tk.StringVar()
         ctk.CTkEntry(body, width=260, textvariable=shares_var).pack(
             anchor="w", padx=4, pady=2)
@@ -4140,12 +4181,12 @@ class App(ctk.CTk):
                 # Claiming "all fed" here would be the vacuous truth again.
                 panel.pack_forget()
                 return
-            ctk.CTkLabel(
+            SelectableMsg(
                 panel,
                 text="All required accounts fed — Show all to review the "
                      "full grid.",
                 font=ctk.CTkFont(size=FS_BODY, weight="bold")).pack(
-                    padx=8, pady=8, anchor="w")
+                    padx=8, pady=8, anchor="w", fill="x")
             bar = ctk.CTkFrame(panel, fg_color="transparent")
             bar.pack(fill="x", padx=8, pady=(0, 6))
             ctk.CTkButton(bar, text="Show all", width=100,
@@ -4153,10 +4194,10 @@ class App(ctk.CTk):
                                                           padx=4)
             return
         left = self._cov_totals()["required_left"]
-        self.cov_count_lbl = ctk.CTkLabel(
+        self.cov_count_lbl = SelectableMsg(
             panel, text="%s left to feed" % _n(left, "position"),
             font=ctk.CTkFont(size=FS_BODY, weight="bold"))
-        self.cov_count_lbl.pack(padx=8, pady=(6, 2), anchor="w")
+        self.cov_count_lbl.pack(padx=8, pady=(6, 2), anchor="w", fill="x")
         bank = next((r.get("bank") for r in self.cov_lots
                      if r.get("account") == self.cov_filter), "")
         if "Schwab" in (bank or ""):
@@ -4309,18 +4350,18 @@ class App(ctk.CTk):
             command=self._template_more, width=110)
         self.template_more_menu.set("More ▾")
         self.template_more_menu.pack(side="left", padx=4)
-        ctk.CTkLabel(
+        SelectableMsg(
             f, text="Download Data: your current data, filled into the "
                    "lots-only CSV template — upload it into another copy "
                    "of the app. Upload stays CSV. Backups live in the "
                    "Danger Zone tab.",
-            text_color=CLR_SECONDARY, wraplength=860,
-            anchor="w").pack(padx=12, anchor="w")
+            text_color=CLR_SECONDARY,
+            anchor="w").pack(padx=12, anchor="w", fill="x")
         self.template_msg = SelectableMsg(f, text="")
         self.template_msg.pack(padx=8, pady=4, anchor="w")
-        ctk.CTkLabel(f, text="Where to find each field at your broker:",
-                     font=ctk.CTkFont(weight="bold")).pack(padx=8, pady=(8, 2),
-                                                           anchor="w")
+        SelectableMsg(f, text="Where to find each field at your broker:",
+                      font=ctk.CTkFont(weight="bold")).pack(
+                          padx=8, pady=(8, 2), anchor="w", fill="x")
         # One scrollable text block, not per-cell labels (fast scrolling).
         guide = ctk.CTkTextbox(f, wrap="word")
         self._scroll_keep["template_guide"] = guide
@@ -4594,7 +4635,8 @@ class App(ctk.CTk):
         ents = []
         for label in (("Passphrase", "Confirm passphrase") if confirm
                       else ("Passphrase",)):
-            ctk.CTkLabel(win, text=label).pack(anchor="w", padx=16)
+            SelectableMsg(win, text=label).pack(
+                anchor="w", padx=16, fill="x")
             ent = ctk.CTkEntry(win, width=300, show="*")
             ent.pack(anchor="w", padx=16, pady=(0, 8))
             ents.append(ent)
@@ -4978,8 +5020,8 @@ class App(ctk.CTk):
                    "Home purchase price $ (optional — Holdings gain %)"),
                   ("cap_note", "Cap context note (shown next to budget)")]
         for key, label in fields:
-            ctk.CTkLabel(body, text=label).pack(anchor="w", padx=4,
-                                                pady=(6, 0))
+            SelectableMsg(body, text=label).pack(anchor="w", padx=4,
+                                                 pady=(6, 0), fill="x")
             ent = ctk.CTkEntry(body, width=380)
             val = self.profile.get(key, "")
             ent.insert(0, "" if val is None else str(val))
@@ -4997,32 +5039,33 @@ class App(ctk.CTk):
         # Enabling the first plugin makes the Utilities tab appear;
         # disabling the last one hides it again (the tab bar rebuilds on
         # save, via build_all → _sync_utility_tabs).
-        ctk.CTkLabel(body, text="Utilities",
-                     font=ctk.CTkFont(weight="bold")).pack(
-                         anchor="w", padx=4, pady=(10, 0))
+        SelectableMsg(body, text="Utilities",
+                      font=ctk.CTkFont(weight="bold")).pack(
+                          anchor="w", padx=4, pady=(10, 0), fill="x")
         plugin_vars = {}
         if not self.plugins:
-            ctk.CTkLabel(
+            SelectableMsg(
                 body, text="No utilities installed.",
-                text_color=CLR_SECONDARY).pack(anchor="w", padx=4, pady=2)
+                text_color=CLR_SECONDARY).pack(anchor="w", padx=4, pady=2,
+                                               fill="x")
         for pid, mod in self.plugins.items():
             var = tk.BooleanVar(value=self._plugin_enabled(pid))
             plugin_vars[pid] = var
             ctk.CTkCheckBox(body, text=mod.PLUGIN_TITLE,
                             variable=var).pack(anchor="w", padx=4,
                                                 pady=(6, 0))
-            ctk.CTkLabel(body, text=mod.PLUGIN_DESC, wraplength=540,
-                         anchor="w",
-                         text_color=CLR_SECONDARY).pack(
-                             anchor="w", padx=28, pady=(0, 2))
+            SelectableMsg(body, text=mod.PLUGIN_DESC,
+                          anchor="w",
+                          text_color=CLR_SECONDARY).pack(
+                              anchor="w", padx=28, pady=(0, 2), fill="x")
         # ---- Properties: addresses live here; the RentCast key too.
         # Refresh (hamburger menu) pulls each estimate and SHOWS it —
         # nothing is replaced until the user accepts it or types a value
         # and presses Save settings. Redfin/Zillow enter through the
         # manual applied value (check in the browser, type the number).
-        ctk.CTkLabel(body, text="Properties",
-                     font=ctk.CTkFont(weight="bold")).pack(
-                         anchor="w", padx=4, pady=(10, 0))
+        SelectableMsg(body, text="Properties",
+                      font=ctk.CTkFont(weight="bold")).pack(
+                          anchor="w", padx=4, pady=(10, 0), fill="x")
         prop_box = ctk.CTkFrame(body, fg_color="transparent")
         prop_box.pack(fill="x", padx=4, pady=2)
         prop_rows = []
@@ -5031,8 +5074,8 @@ class App(ctk.CTk):
             prop = dict(prop or {})
             frame = ctk.CTkFrame(prop_box)
             frame.pack(fill="x", pady=3)
-            ctk.CTkLabel(frame, text="Address (Street, City, State, Zip)").pack(
-                anchor="w", padx=4)
+            SelectableMsg(frame, text="Address (Street, City, State, Zip)").pack(
+                anchor="w", padx=4, fill="x")
             addr = ctk.CTkEntry(frame, width=380)
             addr.insert(0, prop.get("address") or "")
             addr.pack(anchor="w", padx=4, pady=2)
@@ -5071,10 +5114,11 @@ class App(ctk.CTk):
         ctk.CTkButton(body, text="Add property", width=140,
                       command=lambda: add_prop_row()).pack(
                           anchor="w", padx=4, pady=4)
-        ctk.CTkLabel(
+        SelectableMsg(
             body,
             text="RentCast API key (free Developer tier — key only, "
-                 "never an address)").pack(anchor="w", padx=4, pady=(6, 0))
+                 "never an address)").pack(anchor="w", padx=4, pady=(6, 0),
+                                           fill="x")
         key_ent = ctk.CTkEntry(body, width=380)
         key_ent.insert(0, self.profile.get("rentcast_key") or "")
         key_ent.pack(anchor="w", padx=4, pady=2)
@@ -5273,10 +5317,11 @@ class App(ctk.CTk):
 
     def build_data_danger(self):
         f = self._clear_data_tab("Danger Zone")
-        ctk.CTkLabel(
+        SelectableMsg(
             f, text="Danger Zone",
             font=ctk.CTkFont(size=FS_HEAD, weight="bold"),
-            text_color="red").pack(padx=8, pady=(8, 2), anchor="w")
+            text_color="red").pack(padx=8, pady=(8, 2), anchor="w",
+                                   fill="x")
         self._selectable_note(
             f, "Uploads upsert by lot key (account + asset + acquired date "
                "+ cost): matching rows UPDATE, new rows INSERT, uploads "
@@ -5318,10 +5363,11 @@ class App(ctk.CTk):
         # ---- Backups: data safety lives here with delete-all (one-path
         # rule), not split across tabs. Three rows, each button with its
         # status in front of it.
-        ctk.CTkLabel(
+        SelectableMsg(
             f, text="Backups (encrypted JSON, passphrase every time)",
             font=ctk.CTkFont(size=FS_HEAD, weight="bold"),
-            text_color="red").pack(padx=8, pady=(12, 2), anchor="w")
+            text_color="red").pack(padx=8, pady=(12, 2), anchor="w",
+                                   fill="x")
         self._selectable_note(
             f, "One-click encrypted backup of the whole data set (lots, "
                "settings, drift log, price cache, account registry) as a "
@@ -5418,7 +5464,8 @@ class App(ctk.CTk):
         entries = {}
 
         def row(label, default="", width=260):
-            ctk.CTkLabel(body, text=label).pack(anchor="w", padx=4, pady=(6, 0))
+            SelectableMsg(body, text=label).pack(
+                anchor="w", padx=4, pady=(6, 0), fill="x")
             ent = ctk.CTkEntry(body, width=width)
             ent.insert(0, default)
             ent.pack(anchor="w", padx=4, pady=2)
@@ -5443,8 +5490,8 @@ class App(ctk.CTk):
     def add_position_form(self):
         win, body, msg, entries, row = self._form("Add position")
         accounts = sorted({l["account"] for l in self.lots})
-        ctk.CTkLabel(body, text="Account").pack(anchor="w", padx=4,
-                                                pady=(6, 0))
+        SelectableMsg(body, text="Account").pack(
+            anchor="w", padx=4, pady=(6, 0), fill="x")
         acct_menu = ctk.CTkOptionMenu(
             body, values=accounts + ["< new account >"])
         if accounts:
@@ -5454,8 +5501,8 @@ class App(ctk.CTk):
         row("Bank")
         type_menu = ctk.CTkOptionMenu(body, values=pc.ACCOUNT_TYPES)
         type_menu.set("Taxable")
-        ctk.CTkLabel(body, text="Account type (new accounts only)").pack(
-            anchor="w", padx=4, pady=(6, 0))
+        SelectableMsg(body, text="Account type (new accounts only)").pack(
+            anchor="w", padx=4, pady=(6, 0), fill="x")
         type_menu.pack(anchor="w", padx=4, pady=2)
         row("Asset")
         row("Shares")
@@ -5530,13 +5577,13 @@ class App(ctk.CTk):
         ctk.CTkRadioButton(body, text="Specific lot (override)",
                           variable=method, value="specific").pack(
                               anchor="w", padx=4, pady=2)
-        ctk.CTkLabel(body, text="Position (FIFO)").pack(
-            anchor="w", padx=4, pady=(6, 0))
+        SelectableMsg(body, text="Position (FIFO)").pack(
+            anchor="w", padx=4, pady=(6, 0), fill="x")
         pos_menu = ctk.CTkOptionMenu(body, values=pos_opts, width=340)
         pos_menu.set(pos_opts[0])
         pos_menu.pack(anchor="w", padx=4, pady=2)
-        ctk.CTkLabel(body, text="Lot (specific override)").pack(
-            anchor="w", padx=4, pady=(6, 0))
+        SelectableMsg(body, text="Lot (specific override)").pack(
+            anchor="w", padx=4, pady=(6, 0), fill="x")
         menu = ctk.CTkOptionMenu(body, values=opts, width=340)
         menu.set(opts[0])
         menu.pack(anchor="w", padx=4, pady=2)
@@ -5633,8 +5680,8 @@ class App(ctk.CTk):
             self.status_var.set("No closed positions to reopen.")
             return
         win, body, msg, entries, row = self._form("Reopen position")
-        ctk.CTkLabel(body, text="Closed position").pack(
-            anchor="w", padx=4, pady=(6, 0))
+        SelectableMsg(body, text="Closed position").pack(
+            anchor="w", padx=4, pady=(6, 0), fill="x")
         menu = ctk.CTkOptionMenu(body, values=opts, width=340)
         menu.set(opts[0])
         menu.pack(anchor="w", padx=4, pady=2)
