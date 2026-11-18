@@ -135,6 +135,24 @@ def overview_verdict_line(profile):
             % (pc.fmt_usd(total), pc.fmt_usd(ceiling)))
 
 
+def card_figures(profile):
+    """Overview value-card inputs, or None when the plugin is not
+    activated (same gating as the verdict bullet: enabled + applied).
+    Derives straight from the projection and the ceiling setting — no
+    sentence parsing. {"qualified", "magi", "ceiling"}; magi None when
+    the saved projection is not numeric."""
+    st = (profile.get("plugins") or {}).get(PLUGIN_ID) or {}
+    if not (st.get("enabled") and st.get("applied")):
+        return None
+    try:
+        total = projected_total(st)
+    except ValueError:
+        return {"qualified": None, "magi": None, "ceiling": _ceiling(profile)}
+    ceiling = _ceiling(profile)
+    return {"qualified": qualifies(total, ceiling), "magi": total,
+            "ceiling": ceiling}
+
+
 def _state(app):
     """This plugin's namespaced state dict, seeded from DEFAULT_STATE on
     first use (user values are never overwritten by the seed)."""

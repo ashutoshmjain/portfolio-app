@@ -432,11 +432,15 @@ def search_tickers(query, timeout=YAHOO_SEARCH_TIMEOUT, base_url=None,
 # Overview watchlist, directly below the drift chart (watchlist first, the
 # reserved events calendar goes below it when built). The standard list is
 # grouped into asset classes with fixed content — always shown, never
-# editable. Columns stay exactly Ticker | Price | Market cap ($T), no
-# day-change columns. Standard class definitions live HERE in code (shipped,
-# committed, not user data): a first-time user sees the standard watchlists
-# immediately, even with zero positions. User-defined classes are user data:
-# they persist in profile.json (gitignored) and clear on delete-all.
+# editable. Seven columns: Ticker | Price | Week | Month | Quarter |
+# Market cap ($T) | PEG. Week/Month/Quarter are PRICES (the close that far
+# back), not percent changes; PEG is Yahoo's 5-year expected pegRatio.
+# Standard class definitions live HERE in code (shipped, committed, not
+# user data): a first-time user sees the standard watchlists immediately,
+# even with zero positions. User-defined classes are user data: they
+# persist in profile.json (gitignored) and clear on delete-all.
+WATCH_HEADERS = ["Ticker", "Price", "Week", "Month", "Quarter",
+                 "Market cap ($T)", "PEG"]
 WATCHLIST_CLASSES = {
     # The 8 mega-caps (Mag 7 + SpaceX). Class total = sum of members' caps.
     "Octonions": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL",
@@ -525,14 +529,46 @@ def _fi_get(fi, key):
             return None
 
 
+def _shift_months(d, n):
+    """Shift a date back n calendar months, clamping the day (e.g. Mar 31
+    minus 1 month = Feb 28/29)."""
+    import calendar
+    total = d.year * 12 + (d.month - 1) - n
+    y, m0 = divmod(total, 12)
+    m = m0 + 1
+    return datetime.date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def pick_backdate_closes(bars, today):
+    """(week, month, quarter) closes from ONE 3-month history: the close on
+    or before each target date (today-7d, today-1mo, today-3mo). bars =
+    [(date, close), ...] ascending. None when no bar sits on or before the
+    target (no history that far back)."""
+    targets = (today - datetime.timedelta(days=7),
+               _shift_months(today, 1), _shift_months(today, 3))
+    out = []
+    for tgt in targets:
+        close = None
+        for bdate, bclose in bars:
+            if bdate <= tgt:
+                close = bclose
+            else:
+                break
+        out.append(close)
+    return tuple(out)
+
+
 def load_watchlist_cache(path):
-    """Return {ticker: {"price", "mcap"}} from the cache file's watchlist
-    section. Price dicts never pollute load_price_cache (not numbers)."""
+    """Return {ticker: {"price", "mcap", "week", "month", "quarter", "peg"}}
+    from the cache file's watchlist section. Price dicts never pollute
+    load_price_cache (not numbers)."""
     if os.path.exists(path):
         try:
             with open(path) as f:
                 section = json.load(f).get("watchlist") or {}
-            return {str(t): {"price": v.get("price"), "mcap": v.get("mcap")}
+            return {str(t): {"price": v.get("price"), "mcap": v.get("mcap"),
+                             "week": v.get("week"), "month": v.get("month"),
+                             "quarter": v.get("quarter"), "peg": v.get("peg")}
                     for t, v in section.items()
                     if isinstance(v, dict)}
         except (ValueError, OSError, AttributeError):
@@ -540,59 +576,99 @@ def load_watchlist_cache(path):
     return {}
 
 
+def _watch_hist_bars(tk, today):
+    """One 3-month history pull per ticker -> ([(date, close)], last close).
+    The single pull serves the price fallback AND the Week/Month/Quarter
+    backdate picks — never three separate history calls. ([], None) when
+    the pull fails."""
+    try:
+        h = tk.history(period="3mo")
+    except Exception:  # noqa: BLE001 - per-ticker resilience
+        return [], None
+    try:
+        if not len(h):
+            return [], None
+        bars = [(idx.date(), float(close))
+                for idx, close in zip(h.index, h["Close"])]
+        last = float(h["Close"].iloc[-1])
+    except Exception:  # noqa: BLE001 - odd frame shape
+        return [], None
+    bars = [(d, c) for d, c in bars if d <= today]
+    if not bars:
+        return [], None
+    return bars, round(bars[-1][1], 2)
+
+
 def fetch_watchlist(tickers, cache_path, on_done=None):
-    """Quotes + market caps for the Overview watchlist. Same cache file, a
-    separate section; failures fall back to cached quotes and never crash.
-    Any fund without marketCap (GLD, IBIT, ARKB, VTI, user-class ETFs)
-    falls back to total net assets. Returns
+    """Quotes + market caps + backdated prices + PEG for the Overview
+    watchlist. Same cache file, a separate section; failures fall back to
+    cached quotes and never crash. Any fund without marketCap (GLD, IBIT,
+    ARKB, VTI, user-class ETFs) falls back to total net assets. Returns
     (quotes, errors, live): live = tickers with a fresh quote this run
     (Add uses it to reject unknown symbols)."""
     cached = load_watchlist_cache(cache_path)
-    quotes = {t: dict(cached.get(t, {"price": None, "mcap": None}))
+    quotes = {t: dict(cached.get(t, {"price": None, "mcap": None,
+                                     "week": None, "month": None,
+                                     "quarter": None, "peg": None}))
               for t in tickers}
     live = set()
     errors = []
     if yf is None:
         errors.append("yfinance not installed — using cached quotes")
     if yf is not None:
+        import datetime as _dt
         import socket
 
         def one(t):
             try:
                 tk = yf.Ticker(WATCH_YAHOO.get(t, t))
-                price, mcap = None, None
+                price, mcap, peg = None, None, None
                 try:
                     fi = tk.fast_info
                     price = _fi_get(fi, "last_price")
                     mcap = _fi_get(fi, "market_cap")
                 except Exception:  # noqa: BLE001 - per-ticker resilience
                     pass
+                # ONE history pull: the price fallback and the three
+                # backdate picks all come from it.
+                week = month = quarter = None
+                bars, last = _watch_hist_bars(tk, _dt.date.today())
                 if price is None:
-                    try:
-                        h = tk.history(period="5d")
-                        if len(h):
-                            price = float(h["Close"].iloc[-1])
-                    except Exception:  # noqa: BLE001
-                        pass
-                # Net-assets fallback for every fund without a market
-                # cap (GLD, IBIT, ARKB, VTI, any ETF in a user class):
-                # price feeds carry no marketCap for funds, so totalAssets
-                # (else netAssets) stands in. BTC is excluded — its cap is
-                # computed from mined supply, never "--" when priced.
+                    price = last
+                if bars:
+                    week, month, quarter = pick_backdate_closes(
+                        bars, _dt.date.today())
+                # The same tk.info already fetched for the market-cap
+                # fallback also carries the PEG (5-year expected) — no
+                # new data source, no new fetch. BTC/GLD/funds without
+                # one show "-" (never invented).
                 if mcap is None and t != "BTC":
                     try:
                         info = tk.info
                         mcap = info.get("totalAssets") or \
                             info.get("netAssets")
+                        peg = info.get("pegRatio")
                     except Exception:  # noqa: BLE001 - fund info is flaky
+                        pass
+                else:
+                    try:
+                        peg = tk.info.get("pegRatio")
+                    except Exception:  # noqa: BLE001
                         pass
                 if price is not None:
                     price = round(float(price), 2)
                 if mcap is not None:
                     mcap = float(mcap)
-                return t, price, mcap
+                if peg is not None:
+                    try:
+                        peg = float(peg)
+                    except (TypeError, ValueError):
+                        peg = None
+                fresh = {"price": price, "mcap": mcap, "week": week,
+                         "month": month, "quarter": quarter, "peg": peg}
+                return t, fresh
             except Exception as e:  # noqa: BLE001
-                return t, None, "ERR:%s" % type(e).__name__
+                return t, "ERR:%s" % type(e).__name__
 
         prev_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(_FETCH_SOCKET_TIMEOUT)
@@ -601,16 +677,20 @@ def fetch_watchlist(tickers, cache_path, on_done=None):
             for t in tickers:
                 r = got.get(t)
                 if r is None:
-                    price, mcap = None, "ERR:timeout"
+                    fresh, err = None, "ERR:timeout"
                 else:
-                    _t, price, mcap = r
-                if isinstance(mcap, str) and mcap.startswith("ERR"):
-                    errors.append("%s: %s" % (t, mcap[4:]))
+                    _t, fresh = r
+                    err = fresh if isinstance(fresh, str) else None
+                if isinstance(err, str) and err.startswith("ERR"):
+                    errors.append("%s: %s" % (t, err[4:]))
                     continue
-                if price is not None:
-                    if mcap is None:
-                        mcap = quotes[t].get("mcap")
-                    quotes[t] = {"price": price, "mcap": mcap}
+                if fresh.get("price") is not None:
+                    # Same fallback as price/mcap for every key: a fresh
+                    # miss keeps the cached value, never a blank.
+                    for key in ("mcap", "week", "month", "quarter", "peg"):
+                        if fresh.get(key) is None:
+                            fresh[key] = quotes[t].get(key)
+                    quotes[t] = fresh
                     live.add(t)
                 elif quotes[t].get("price") is None:
                     errors.append("%s: no quote (offline and "
@@ -642,6 +722,64 @@ def fetch_watchlist(tickers, cache_path, on_done=None):
     except OSError:
         pass
     return quotes, errors, live
+
+
+def overview_cards(drift, spending, cap, cap_note, proj, med_figures):
+    """Value-card specs for the Overview: [{title, value, detail}]. Pure
+    data shaping — the app renders one card per spec (Drift, Medi-Cal when
+    activated, Gains headroom, After-65 AGI guardrail). Short single-line
+    strings by design (cards never wrap)."""
+    # Drift points use the shared zero/negative rule (same as the app's
+    # drift_pp_text: "--" unknown, "-" zero, "(x.xpp)" when negative).
+    pp = drift.get("drift_pp")
+    if pp is None:
+        pp_txt = "--"
+    elif pp == 0:
+        pp_txt = "-"
+    else:
+        s = "%.1fpp" % abs(pp * 100)
+        pp_txt = "(%s)" % s if pp < 0 else s
+    cards = [{"title": "Drift (year to date)",
+              "value": pp_txt,
+              "detail": "actual %s vs standard %s" % (
+                  fmt_pct(drift.get("actual_ytd")),
+                  fmt_pct(drift.get("standard_ytd")))}]
+    if med_figures is not None:
+        qualified, magi, ceiling = (med_figures.get("qualified"),
+                                    med_figures.get("magi"),
+                                    med_figures.get("ceiling"))
+        if qualified is None:
+            value, detail = "-", ("Saved projection is not numeric — "
+                                  "open the Medi-Cal tab.")
+        else:
+            value = "Qualified" if qualified else "Not qualified"
+            detail = "MAGI %s vs %s ceiling" % (fmt_usd(magi),
+                                                fmt_usd(ceiling))
+        cards.append({"title": "Medi-Cal", "value": value, "detail": detail})
+    if spending.get("headroom") is None:
+        cards.append({"title": "Gains headroom", "value": "-",
+                      "detail": "no ceiling set"})
+    else:
+        cards.append({"title": "Gains headroom",
+                      "value": fmt_usd(spending["headroom"]),
+                      "detail": "of the %s cap%s%s" % (
+                          fmt_usd(cap),
+                          " (%s)" % cap_note if cap_note else "", proj)})
+    if spending.get("agi_threshold") is None or \
+            spending.get("agi_total") is None:
+        cards.append({"title": "After-65 AGI guardrail", "value": "-",
+                      "detail": "no threshold set"})
+    else:
+        over = spending["agi_total"] > spending["agi_threshold"]
+        cards.append({"title": "After-65 AGI guardrail",
+                      "value": "%s by %s" % (
+                          "OVER" if over else "UNDER",
+                          fmt_usd(abs(spending["agi_threshold"] -
+                                      spending["agi_total"]))),
+                      "detail": "%s vs %s threshold" % (
+                          fmt_usd(spending["agi_total"]),
+                          fmt_usd(spending["agi_threshold"]))})
+    return cards
 
 
 # ================= views =================
@@ -1629,20 +1767,20 @@ RETIREMENT_TYPES_UNLOCK65 = ("Traditional IRA", "Roth IRA")
 
 def holdings_by_asset(lots, prices, home_value, home_cost=None,
                       homes=None):
-    """One row per asset aggregated across accounts (open lots only;
-    CASH_USD excluded — cash lives in Liquidity). A position's average and
-    gains show ONLY when ALL its open lots have cost (`complete`); partial
-    averages misread as whole-position figures, so incomplete positions
-    report cost as missing instead. Home is one row PER PROPERTY (cost =
-    purchase price if known and a single property, else value only, no
-    gain) and is always complete; pass homes=[(label, value)] or omit for
-    the legacy single "Home (real estate)" row.
+    """One row per asset aggregated across accounts (open lots only) —
+    CASH_USD aggregates into a row like any other ticker (the app renders
+    its cost/gain as "—": cash has no cost basis to enter and no gain).
+    A position's average and gains show ONLY when ALL its open lots have
+    cost (`complete`); partial averages misread as whole-position figures,
+    so incomplete positions report cost as missing instead. Home is one
+    row PER PROPERTY (cost = purchase price if known and a single
+    property, else value only, no gain) and is always complete; pass
+    homes=[(label, value)] or omit for the legacy single
+    "Home (real estate)" row.
     Returns ([rows], total_value) sorted by value desc; each row carries
     per-account lot detail for expansion."""
     agg = {}
     for lot in open_lots(lots):
-        if lot.get("asset") == CASH_ASSET:
-            continue
         a = agg.setdefault(lot["asset"], {"shares": 0.0, "known_sh": 0.0,
                                           "known_cost": 0.0, "by_acct": {}})
         sh = lot.get("shares") or 0.0
@@ -1653,7 +1791,8 @@ def holdings_by_asset(lots, prices, home_value, home_cost=None,
         a["by_acct"].setdefault(lot.get("account"), []).append(lot)
     rows = []
     for asset, a in agg.items():
-        price = prices.get(asset)
+        # Cash is priced at $1.00 wherever a price is needed.
+        price = 1.0 if asset == CASH_ASSET else prices.get(asset)
         value = None if price is None else a["shares"] * price
         missing = a["shares"] - a["known_sh"]
         complete = missing <= 1e-9
@@ -1664,6 +1803,12 @@ def holdings_by_asset(lots, prices, home_value, home_cost=None,
             gain_pct = gain / a["known_cost"] if a["known_cost"] else None
         else:
             gain, gain_pct = None, None
+        if asset == CASH_ASSET:
+            # Cash has no cost basis to enter and no gain: the stored
+            # cost=1 is an amount convention (shares=amount), not a basis.
+            # The row is always complete and never shows "upload".
+            avg, gain, gain_pct = None, None, None
+            missing, complete = 0.0, True
         rows.append({"asset": asset, "shares": a["shares"],
                      "missing": missing, "complete": complete,
                      "avg_cost": avg, "price": price, "value": value,

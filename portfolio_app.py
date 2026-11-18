@@ -48,19 +48,18 @@ def _n(n, one, many=None):
 
 
 # ---- app-wide type scale: ONE place, not scattered per-widget values ----
-# Retirement-planner audience skews older: everything sits a touch above
-# the minimum — body 14px (floor 13px), headings a few px above body,
-# bold table headers at body size. Widgets without an explicit font
-# inherit FS_BODY via the theme default below, so buttons and entries are
-# legible with no per-widget edits. NOTE: CTk sizes are pixels but tkinter
-# renders points (px * 72/96), so these are chosen to land exactly:
-# 14px -> 10.5pt -> 14px, 18px -> 13.5pt -> 18px, 22px -> 16.5pt -> 22px.
-# Body text smaller than the ~13px floor is fine ONLY when it never wraps
-# — single-line values the eye scans, never paragraphs.
-FS_BODY = 14          # body text, everywhere
-FS_HEAD = 18          # section headings (body + 4)
-FS_TITLE = 22         # top headline numbers
-FS_TABLE_HEAD = 14    # bold table headers
+# Compact dashboard scale (2026-11-18, user's call): body 12px, headings
+# a few px above body, bold table headers at body size. Widgets without
+# an explicit font inherit FS_BODY via the theme default below, so buttons
+# and entries stay legible with no per-widget edits. NOTE: CTk sizes are
+# pixels but tkinter renders points (px * 72/96), so these are chosen to
+# land exactly: 12px -> 9pt -> 12px, 16px -> 12pt -> 16px,
+# 18px -> 13.5pt -> 18px. Body text smaller than ~11px is fine ONLY when
+# it never wraps — single-line values the eye scans, never paragraphs.
+FS_BODY = 12          # body text, everywhere
+FS_HEAD = 16          # section headings (body + 4)
+FS_TITLE = 18         # top headline numbers
+FS_TABLE_HEAD = 12    # bold table headers
 FS_SMALL = 11         # secondary hints only — never body text
 # Secondary text on dark: light enough to read at body size (never tiny +
 # dim). Body text itself is always the default light color, never this.
@@ -193,6 +192,41 @@ def drift_pp_text(x):
         return "-"
     s = "%.1fpp" % abs(x * 100)
     return "(%s)" % s if x < 0 else s
+
+
+def watch_row_values(label, quote):
+    """Seven watchlist cells for one ticker: label, price, week, month,
+    quarter, market cap, PEG. Headless-pure: _watch_row delegates to this
+    so every class (Octonions, Bitcoin, Gold, user-defined) shares the
+    one row builder. Missing history/PEG renders "-" (bare dash); an
+    unknown market cap renders "--" — except BTC, whose cap is COMPUTED
+    from mined supply x price and never "--" when priced."""
+    quote = quote or {}
+    price = quote.get("price")
+    if label == "BTC" and price is not None:
+        mcap = pc.btc_class_mcap(price)
+    else:
+        mcap = quote.get("mcap")
+
+    def hist(key):
+        v = quote.get(key)
+        return "-" if v is None else money(v)
+
+    peg = quote.get("peg")
+    return [label, money(price), hist("week"), hist("month"),
+            hist("quarter"),
+            "--" if mcap is None else "$%.2fT" % (mcap / 1e12),
+            "-" if peg is None else "%.2f" % peg]
+
+
+def required_line_text(missing):
+    """The REQUIRED line in one home for both wordings: the count still
+    missing cost or dates, or the all-complete line when nothing is."""
+    if missing:
+        return ("%d REQUIRED position%s still missing cost or dates — "
+                "feed them in Data Entry."
+                % (missing, "" if missing == 1 else "s"))
+    return "All REQUIRED positions have cost and dates."
 
 
 class SelectableMsg:
@@ -423,7 +457,7 @@ class App(ctk.CTk):
         # narrow split-screen window never chops them) ----
         top = ctk.CTkFrame(self)
         top.pack(fill="x", padx=10, pady=8)
-        SelectableMsg(top, text="PORTFOLIO DASHBOARD",
+        SelectableMsg(top, text="Portfolio",
                       font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
                           side="left", padx=8)
         self.date_lbl = SelectableMsg(
@@ -1592,7 +1626,6 @@ class App(ctk.CTk):
         d = self.data["drift"]
         cap = sp["cap"]
         cap_note = (self.profile.get("cap_note") or "").strip()
-        missing = self._required_missing()
         SelectableMsg(body, text="Total net worth: %s" % money(tnw),
                       font=ctk.CTkFont(size=FS_TITLE,
                                        weight="bold")).pack(
@@ -1635,69 +1668,21 @@ class App(ctk.CTk):
         try:
             med_line = (med_mod.overview_verdict_line(self.profile)
                         if med_mod is not None else None)
+            med_figures = (med_mod.card_figures(self.profile)
+                           if med_line is not None else None)
         except Exception:  # noqa: BLE001 - a bad plugin state must not
             # break the Overview; the plugin tab shows the fix-it text.
             med_line = None
-        if sp["headroom"] is None:
-            headroom_alert = ("Gains headroom unknown — no ceiling set.")
-        else:
-            headroom_alert = ("Gains headroom: %s of the %s cap%s%s. "
-                              "Harvesting losses increases headroom."
-                              % (money(sp["headroom"]), money(cap),
-                                 " (%s)" % cap_note if cap_note else "",
-                                 proj))
-        if sp["agi_threshold"] is None or sp["agi_total"] is None:
-            agi_alert = ("After-65 AGI guardrail: no threshold set — "
-                         "set one in Settings.")
-        else:
-            agi_alert = ("After-65 AGI guardrail: IRAs/20 %s + other %s = "
-                         "%s vs %s threshold: %s by %s (SS taxation not "
-                         "modeled)."
-                         % (money(sp["after65_base"]), money(sp["other"]),
-                            money(sp["agi_total"]),
-                            money(sp["agi_threshold"]),
-                            "UNDER" if sp["agi_total"] <= sp["agi_threshold"]
-                            else "OVER",
-                            money(abs(sp["agi_threshold"]
-                                      - sp["agi_total"]))))
-        alerts = [
-            # Drift defines itself in the user's words; the figure is a
-            # difference of two returns, so it renders in points
-            # ("5.4pp"), parenthesized when negative.
-            "Drift (year to date): the diff between how your portfolio "
-            "is behaving and the standard allocation — actual %s vs "
-            "standard %s; drift %s." % (
-                pct(d["actual_ytd"]), pct(d["standard_ytd"]),
-                drift_pp_text(d["drift_pp"])),
-            headroom_alert,
-            agi_alert,
-            "%d REQUIRED position%s still missing cost or dates — feed "
-            "them in Data Entry." % (missing, "" if missing == 1 else "s")
-            if missing else
-            "All REQUIRED positions have cost and dates.",
-        ]
-        # The Medi-Cal verdict bullet sits in the old MAGI slot (second),
-        # but ONLY when the plugin is activated — otherwise no Medi-Cal
-        # line at all. Copy summary shares `alerts`, so it carries the
-        # same line automatically.
-        if med_line is not None:
-            alerts.insert(1, med_line)
-        for alert in alerts:
-            SelectableMsg(body, text="• " + alert, anchor="w").pack(
-                padx=10, pady=1, anchor="w", fill="x")
-        summary = ("Total net worth: %s\n"
-                   "Allowed spending (as of %s): %s/yr before 65 · "
-                   "%s/yr after 65 (+ Social Security = %s).\n"
-                   "%s\n%s"
-                   % (money(tnw), sp["asof"], money(sp["before65"]),
-                      money(sp["after65_base"]), money(sp["after65_allin"]),
-                      real_line,
-                      "\n".join("• " + a for a in alerts)))
-        ctk.CTkButton(body, text="Copy summary", width=140,
-                      command=lambda:
-                      self._to_clipboard(summary, "Overview summary copied "
-                                                 "— paste anywhere.")
-                      ).pack(padx=10, pady=(6, 2), anchor="w")
+            med_figures = None
+        # Value cards, not bullets: the four metric specs (Drift,
+        # Medi-Cal when activated, Gains headroom, AGI guardrail) render
+        # as one shared-helper card row below the Realizable line. The
+        # main summary lines stay SelectableMsg, so the summary is still
+        # copyable per line — no one-click copy button (removed 2026-11-18
+        # by the user's call for elegance). The missing-cost line lives
+        # on the Holdings tab, not here.
+        self._overview_cards(body, pc.overview_cards(
+            d, sp, cap, cap_note, proj, med_figures))
         # Primary visual: the Actual-vs-Standard daily-close LINE chart —
         # the same shared implementation (and values) as Diversification.
         # The allocation bar chart lives in Diversification only.
@@ -1718,18 +1703,43 @@ class App(ctk.CTk):
         # build the calendar in this pass — this comment reserves the
         # space.
 
+    def _overview_cards(self, body, cards):
+        # Shared card helper (climate-app tutorial's "Value cards"
+        # layout): a transparent wrapper gridded with one equal uniform
+        # column per card — no empty slot when Medi-Cal is inactive —
+        # 20px gaps between cards, 20px of space below the row. Each card
+        # is a plain CTkFrame with three left-aligned CTkLabels and no
+        # icon: a small gray title, a large bold value, a small gray
+        # detail. CTkLabel, not SelectableMsg, by design: single-line
+        # card text never hits the centered-wrapped-lines defect (style
+        # guide §3 keep-list); the main summary lines stay selectable.
+        wrap = ctk.CTkFrame(body, fg_color="transparent")
+        wrap.pack(fill="x", padx=10, pady=(4, 20))
+        for i in range(len(cards)):
+            wrap.grid_columnconfigure(i, weight=1, uniform="cards")
+        for i, card in enumerate(cards):
+            box = ctk.CTkFrame(wrap)
+            box.grid(row=0, column=i, sticky="ew",
+                     padx=(0, 20) if i < len(cards) - 1 else (0, 0))
+            ctk.CTkLabel(box, text=card["title"],
+                         font=ctk.CTkFont(size=FS_SMALL),
+                         text_color=CLR_SECONDARY).grid(
+                             row=0, column=0, sticky="w",
+                             padx=15, pady=(10, 0))
+            ctk.CTkLabel(box, text=card["value"],
+                         font=ctk.CTkFont(size=FS_TITLE,
+                                          weight="bold")).grid(
+                                              row=1, column=0, sticky="w",
+                                              padx=15)
+            ctk.CTkLabel(box, text=card["detail"],
+                         font=ctk.CTkFont(size=FS_SMALL),
+                         text_color=CLR_SECONDARY).grid(
+                             row=2, column=0, sticky="w",
+                             padx=15, pady=(0, 8))
+
     def _watch_row(self, t):
         q = (self.watch or {}).get(t, {})
-        price = q.get("price")
-        t = self._watch_label(t)
-        if t == "BTC" and price is not None:
-            # BTC-USD quotes carry no market cap: COMPUTE mined supply x
-            # price, so the row never shows "--" when priced.
-            mcap = pc.btc_class_mcap(price)
-        else:
-            mcap = q.get("mcap")
-        return [t, money(price),
-                "--" if mcap is None else "$%.2fT" % (mcap / 1e12)]
+        return watch_row_values(self._watch_label(t), q)
 
     def _watch_class_title(self, name, tickers):
         # Header shows the class name + its total approx market cap. The
@@ -1785,7 +1795,7 @@ class App(ctk.CTk):
         if standard:
             ctk.CTkLabel(head, text="standard",
                          text_color=CLR_SECONDARY).pack(side="left", padx=8)
-            Table(body, ["Ticker", "Price", "Market cap ($T)"],
+            Table(body, pc.WATCH_HEADERS,
                   [self._watch_row(t) for t in tickers]
                   ).pack(fill="x", padx=10, pady=4)
             return
@@ -1812,21 +1822,26 @@ class App(ctk.CTk):
                                                            padx=4)
 
     def _watch_ticker_row(self, body, classname, t):
+        # Seven columns + Remove, sized to fit ~960px split-screen with no
+        # horizontal scrollbar: historical prices take the Price column's
+        # width or narrower; PEG is a short number.
         vals = self._watch_row(t)
         row = ctk.CTkFrame(body)
         row.pack(fill="x", padx=10, pady=1)
         for col, (txt, w) in enumerate(
-                [(vals[0], 90), (vals[1], 110), (vals[2], 130)]):
+                [(vals[0], 70), (vals[1], 90), (vals[2], 90),
+                 (vals[3], 90), (vals[4], 90), (vals[5], 110),
+                 (vals[6], 60)]):
             neg = pc.is_negative_figure(txt)
             ctk.CTkLabel(row, text=txt, width=w, anchor="w",
                          text_color="red" if neg else None).grid(
                              row=0, column=col, padx=4, sticky="w")
         ctk.CTkButton(row, text="Remove", width=90,
                       command=lambda: self._watch_remove(
-                          classname, t)).grid(row=0, column=3, padx=4)
+                          classname, t)).grid(row=0, column=7, padx=4)
 
     def _copy_watch_class(self, name, tickers):
-        lines = ["\t".join(["Ticker", "Price", "Market cap ($T)"])]
+        lines = ["\t".join(pc.WATCH_HEADERS)]
         for t in tickers:
             lines.append("\t".join(self._watch_row(t)))
         self._to_clipboard("\n".join(lines),
@@ -2054,6 +2069,12 @@ class App(ctk.CTk):
         f = self._clear_dash("Holdings")
         if getattr(self, "_hold_expanded", None) is None:
             self._hold_expanded = set()
+        # The REQUIRED line moved here from the Overview (its new home:
+        # Holdings is where the missing cost is visible — the Cost column
+        # reads "upload" there). Same text, same logic, Body style.
+        SelectableMsg(f, text=required_line_text(self._required_missing()),
+                      font=ctk.CTkFont(size=FS_BODY)).pack(
+                          padx=6, pady=(6, 0), anchor="w", fill="x")
         # One Holdings row per property (today: one home row). Purchase-
         # price gain math only in the single-property case.
         home_rows = self._home_rows()
@@ -2076,19 +2097,21 @@ class App(ctk.CTk):
                              row=0, column=col, padx=2, sticky="w")
         for r in rows:
             self._hold_row(scroll, r)
-        # Totals row: total value + total gains, labeled with what it
-        # includes (positions + home rows; cash excluded — cash lives in
-        # Accounts / Liquidity, never in Holdings). Gains total shows only
-        # when every row's gain is computable, never a partial sum.
+        # Totals row: total value + total gains. The total now includes
+        # everything (positions + cash + home), so the label is plain
+        # TOTAL — no qualifier needed. Gains total shows only when every
+        # row's gain is computable, never a partial sum (cash carries no
+        # gain by design, so it never trips the unknown flag).
         tot_gain = sum(r["gain"] for r in rows if r["gain"] is not None)
-        gain_unknown = any(r["gain"] is None for r in rows)
+        gain_unknown = any(r["gain"] is None
+                           and r["asset"] != pc.CASH_ASSET for r in rows)
         tot = ctk.CTkFrame(scroll)
         tot.pack(fill="x", padx=4, pady=(4, 1))
         tline = ctk.CTkFrame(tot, fg_color="transparent")
         tline.pack(fill="x")
         ctk.CTkLabel(tline, text="", width=30).grid(row=0, column=0,
                                                    padx=2)
-        tcells = [("TOTAL (positions + home; cash excluded)", 150),
+        tcells = [("TOTAL", 150),
                   ("", 90), ("", 170), ("", 90),
                   (money(_total), 100),
                   (("--" if gain_unknown else money(tot_gain)), 90),
@@ -2109,15 +2132,16 @@ class App(ctk.CTk):
                 padx=10, pady=(2, 4), fill="x")
         ctk.CTkButton(f, text="Copy table", width=110,
                       command=lambda: self._copy_holdings(rows)
-                      ).pack(padx=6, pady=(6, 0), anchor="w")
+                      ).pack(padx=6, pady=(6, 0), anchor="e")
         SelectableMsg(
             f, text="Averages and gains show only when every open lot has "
                     "cost — otherwise Avg reads upload (hover for the "
                     "missing count) and gains read --. The table is a "
                     "checklist: upload the missing cost data in Data Entry. "
-                    "Cash lives in Liquidity. Home is one row per property "
-                    "(value only unless a purchase price is set in "
-                    "Settings). "
+                    "Cash is a row like any other ticker (cost —, gain —; "
+                    "its dropdown groups by institution). Home is one row "
+                    "per property (value only unless a purchase price is "
+                    "set in Settings). "
                     "Click ▶ on a row for its per-account breakdown.",
             anchor="w").pack(padx=6, pady=6, anchor="w", fill="x")
 
@@ -2126,18 +2150,22 @@ class App(ctk.CTk):
                              "Current price", "Current value", "Net gain $",
                              "Net gain %"])]
         for r in rows:
+            cash = (r["asset"] == pc.CASH_ASSET)
             lines.append("\t".join([
                 r["asset"], pc._fmt_shares(r["shares"]),
-                self._hold_avg_text(r["avg_cost"], r["missing"]),
+                "—" if cash else self._hold_avg_text(r["avg_cost"],
+                                                     r["missing"]),
                 "--" if r["price"] is None else "$%.2f" % r["price"],
                 money(r["value"]),
-                "--" if r["gain"] is None else money(r["gain"]),
-                "--" if r["gain_pct"] is None else "%.1f%%" % (
-                    r["gain_pct"] * 100)]))
+                "—" if cash else ("--" if r["gain"] is None
+                                   else money(r["gain"])),
+                "—" if cash else ("--" if r["gain_pct"] is None
+                                   else "%.1f%%" % (r["gain_pct"] * 100))]))
         tot_gain = sum(r["gain"] for r in rows if r["gain"] is not None)
-        gain_unknown = any(r["gain"] is None for r in rows)
+        gain_unknown = any(r["gain"] is None
+                           and r["asset"] != pc.CASH_ASSET for r in rows)
         lines.append("\t".join([
-            "TOTAL (positions + home; cash excluded)", "", "", "",
+            "TOTAL", "", "", "",
             money(sum(r["value"] for r in rows
                       if r["value"] is not None)),
             "--" if gain_unknown else money(tot_gain), ""]))
@@ -2161,19 +2189,24 @@ class App(ctk.CTk):
         else:
             ctk.CTkLabel(line, text="", width=30).grid(row=0, column=0,
                                                       padx=2)
+        # Cash is a row like any other ticker, but its cost and gain
+        # cells read "—": cash has no cost basis to enter and no gain.
+        cash = (r["asset"] == pc.CASH_ASSET)
         cells = [
             r["asset"], pc._fmt_shares(r["shares"]),
-            self._hold_avg_text(r["avg_cost"], r["missing"]),
+            "—" if cash else self._hold_avg_text(r["avg_cost"],
+                                                 r["missing"]),
             "--" if r["price"] is None else "$%.2f" % r["price"],
             money(r["value"]),
-            "--" if r["gain"] is None else money(r["gain"]),
-            "--" if r["gain_pct"] is None else "%.1f%%" % (
-                r["gain_pct"] * 100)]
+            "—" if cash else ("--" if r["gain"] is None
+                              else money(r["gain"])),
+            "—" if cash else ("--" if r["gain_pct"] is None
+                              else "%.1f%%" % (r["gain_pct"] * 100))]
         widths = [150, 90, 170, 90, 100, 90, 80]
         for col, (txt, w) in enumerate(zip(cells, widths)):
             lbl = ctk.CTkLabel(line, text=txt, width=w, anchor="w")
             lbl.grid(row=0, column=col + 1, padx=2, sticky="w")
-            if col == 2 and not r.get("complete", True):
+            if col == 2 and not cash and not r.get("complete", True):
                 self._tooltip(lbl, self._hold_missing_tip(
                     r["missing"], r["shares"]))
         detail = ctk.CTkFrame(box, fg_color="transparent")
@@ -2185,6 +2218,25 @@ class App(ctk.CTk):
         # Per-account aggregates (same completeness rule as the summary:
         # average and gains show only when that account's lots for the
         # asset all have cost — this shows WHICH accounts still need data).
+        if r["asset"] == pc.CASH_ASSET:
+            # Cash groups by INSTITUTION, not account: the user asked for
+            # the institution-wise breakup (Wells, Chase, Schwab, ...).
+            insts = {}
+            for acct, lots in r["by_acct"].items():
+                bank = (lots[0].get("bank") if lots else "") or "?"
+                insts.setdefault(bank, []).extend(lots)
+            for ri, bank in enumerate(sorted(insts)):
+                lots = insts[bank]
+                sh = sum(l.get("shares") or 0.0 for l in lots)
+                cells = ["    " + bank, pc._fmt_shares(sh), "—", "$1.00",
+                         money(sh), "—", "—"]
+                widths = [150, 90, 170, 90, 100, 90, 80]
+                for col, (txt, w) in enumerate(zip(cells, widths)):
+                    ctk.CTkLabel(detail, text=txt, width=w, anchor="w",
+                                 text_color=CLR_SECONDARY).grid(
+                                     row=ri, column=col + 1, padx=2,
+                                     sticky="w")
+            return
         for ri, acct in enumerate(sorted(r["by_acct"])):
             lots = r["by_acct"][acct]
             sh = sum(l.get("shares") or 0.0 for l in lots)
@@ -2312,7 +2364,7 @@ class App(ctk.CTk):
         banks = pc.liquidity_by_bank(self.lots, self.prices)
         ctk.CTkButton(f, text="Copy table", width=110,
                       command=lambda: self._copy_liquidity(banks)
-                      ).pack(padx=6, pady=(0, 2), anchor="w")
+                      ).pack(padx=6, pady=(0, 2), anchor="e")
         scroll = ctk.CTkScrollableFrame(f)
         scroll.pack(fill="both", expand=True, padx=6, pady=6)
         self._liq_scroll = scroll

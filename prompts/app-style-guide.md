@@ -28,15 +28,15 @@ until a prompt fixes it — unless the user has said otherwise.
 
 | Constant | Size | Use |
 |---|---|---|
-| `FS_BODY` | 14 | Body text minimum, everywhere |
-| `FS_HEAD` | 18 | Section headings |
-| `FS_TITLE` | 22 | Top headline numbers |
-| `FS_TABLE_HEAD` | 14, bold | Table headers |
+| `FS_BODY` | 12 | Body text, everywhere |
+| `FS_HEAD` | 16 | Section headings |
+| `FS_TITLE` | 18 | Top headline numbers |
+| `FS_TABLE_HEAD` | 12, bold | Table headers |
 | `FS_SMALL` | 11 | Secondary hints only — never body text |
 
-(All five dropped by 2 on 2026-11-18, by the user's call — this
-supersedes the earlier "body ≥ 15px" minimum. The scale still steps
-by 4 / 4 / 8 from body: head = body + 4, title = body + 8.)
+(The scale changed again on 2026-11-18 by the user's call — headline
+18, body 12, superseding the earlier "body ≥ 15px" minimum. The steps
+are now head = body + 4, title = body + 6.)
 
 - Never set a font size inline per widget; use the named constants.
 - The theme default font size is `FS_BODY`.
@@ -90,6 +90,12 @@ default — and it makes the text selectable.
      (a table can be hundreds of cells). The tables already carry a
      "Copy table" button (TSV), so per-cell selection adds little.
   2. Layout spacers / markers — empty `width=30` labels, the "●" dot.
+  3. Overview value cards — three stacked `CTkLabel`s per card (small
+     gray title, large bold value, small gray detail). The card text
+     is short and single-line by design, so the centered-wrapped-lines
+     defect does not apply (see §7). Trade-off, stated: the card
+     figures are view-only; the main summary lines stay `SelectableMsg`
+     and copyable.
 - **Controls are not text.** Buttons, entries, combos, checkboxes,
   switches, and tab names stay their own widget types.
 - Long text wraps at the container width and reflows on resize.
@@ -143,9 +149,15 @@ facts, the same way everywhere:
 - Money and percents use the shared `fmt_usd` / `pct` /
   `drift_pp_text` helpers (see §4 for zero / negative).
 - **Copy must be real.** Every message, summary, and table carries a
-  copy path: selectable text, "Copy summary", "Copy table" (TSV).
-  A label that can only be copied by click+Ctrl+C is not enough for
+  copy path: selectable text, "Copy table" (TSV). (The Overview
+  summary's one-click "Copy summary" button was removed 2026-11-18
+  by the user's call for elegance; the summary's copy path is now
+  the selectable text — drag to select, Ctrl+C to copy.) A label
+  that can only be copied by click+Ctrl+C is not enough for
   a message the user will paste elsewhere.
+- **"Copy table" buttons sit on the right edge of their table
+  (right-aligned), across the app** — so any future "Copy table"
+  button follows the same rule.
 - App copy reads as record-keeping, never as a trading platform.
 
 ## 7. Headings and structure
