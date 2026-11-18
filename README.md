@@ -6,16 +6,18 @@ Windows PC.
 
 ## What it shows
 
-Sidebar pages, in order: **Overview, Accounts, Holdings, Liquidity, Tax, Diversification, Inputs, Template, Danger Zone, Utilities.** The Overview header holds one button: Refresh stocks (which also logs closes to the drift log). The sidebar bottom holds the appearance + scaling menus and Settings.
+Sidebar pages, in order: **Overview, Accounts, Holdings, Liquidity, Tax, Diversification, Inputs, Template, Danger Zone, Utilities.** Refresh stocks lives in the sidebar bottom (below the appearance + scaling menus, above Settings) so every page can reach it — it also logs closes to the drift log; the Overview header shows the progress bar while a refresh runs. The sidebar collapses with « (» in the header brings it back).
 
-- **Overview** (landing page: net worth, COMPUTED
+- **Overview** (landing page: Total net worth in the header beside the
+  title; COMPUTED
   spending radar — before-65 pool ÷ whole years to 65, IRAs ÷ 20, Social
   Security all-in, realizable figure, Medi-Cal MAGI status + headroom and
   the after-65 AGI guardrail, all as of today at last-refresh prices —
-  four value cards (drift, Medi-Cal when active, gains headroom, after-65 AGI guardrail), then the Actual-vs-Standard
+  four value cards (drift, Medi-Cal when active, gains headroom, after-65 AGI guardrail), then the compact Actual-vs-Standard
   daily-close LINE chart — blue Actual total $, red Standard total $,
   $2M–$5M / $100K steps, same shared implementation and values as
-  Diversification; then the watchlist — standard asset classes
+  Diversification — with a controls panel beside it (Show standard
+  toggle, Save chart as PNG); then the watchlist — standard asset classes
   (Octonions: the 8 mega-caps; Bitcoin: BTC + MSTR/IBIT/ARKB proxies;
   Gold: GLD) plus your own named watchlist classes, each with its class
   total; BTC's cap is COMPUTED as mined supply × price (BTC-USD carries no
@@ -117,9 +119,9 @@ future upcoming-events calendar for portfolio holdings.)
 ## Readability (older eyes, split screen)
 
 - Type scale lives in one place (`FS_BODY` / `FS_HEAD` / `FS_TITLE` /
-  `FS_TABLE_HEAD` in `portfolio_app.py`): body 12px everywhere, headings 16px, headline numbers 18px, bold table headers 12px. Every widget
+  `FS_TABLE_HEAD` in `portfolio_app.py`): body 10px everywhere, headings 14px, card values 18px, bold table headers 10px. Every widget
   without an explicit font inherits body size from the theme default, so
-  buttons and entries are legible with no per-widget edits. (CTk sizes are
+  buttons and entries stay usable with no per-widget edits. (CTk sizes are
   pixels but tkinter renders points — the values are chosen to land
   exactly; don't pick odd sizes.)
 - Dark theme kept; body text is always light, secondary rows use a readable

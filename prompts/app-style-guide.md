@@ -28,23 +28,27 @@ until a prompt fixes it — unless the user has said otherwise.
 
 | Constant | Size | Use |
 |---|---|---|
-| `FS_BODY` | 12 | Body text, everywhere |
-| `FS_HEAD` | 16 | Section headings |
-| `FS_TITLE` | 18 | Top headline numbers |
-| `FS_TABLE_HEAD` | 12, bold | Table headers |
+| `FS_BODY` | 10 | Body text, everywhere |
+| `FS_HEAD` | 14 | Section headings |
+| `FS_TITLE` | 18 | Value-card values only |
+| `FS_TABLE_HEAD` | 10, bold | Table headers |
 | `FS_SMALL` | 11 | Secondary hints only — never body text |
 
-(The scale changed again on 2026-11-18 by the user's call — headline
-18, body 12, superseding the earlier "body ≥ 15px" minimum. The steps
-are now head = body + 4, title = body + 6.)
+(The scale changed again on 2026-11-18 by the user's call —
+Prompt 13: body 10, headings 14, table headers 10, card values 18,
+superseding the earlier 12/16/12/18. The steps are now head = body +
+4. Body text below ~11px is fine ONLY for single-line values the eye
+scans, never paragraphs.)
 
-> **Tutorial mapping (adopted as-is, 2026-11-18).** The sidebar shell
-> follows the climate-app tutorial's layout with its own sizes: the
-> tutorial **title size (26, bold)** is used for the page header title
-> AND the Total net worth headline; the tutorial **value size (20,
+> **Tutorial mapping (adopted as-is, 2026-11-18; header line moved by
+> Prompt 13).** The sidebar shell follows the climate-app tutorial's
+> layout with its own sizes: the tutorial **title size (26, bold)** is
+> used for the page header title; the tutorial **value size (20,
 > bold)** is used for the "Retirement Portfolio" sidebar title AND the
-> value-card values. Those two sizes are the only inline font sizes
-> this app carries — everything else uses the constants above.
+> value-card values. The Total net worth figure moved OUT of the body
+> into the header — small gray text beside the title, 11px literal at
+> the header line creation, the ONLY numeric font size this app
+> carries. Everything else uses the constants above.
 
 - Never set a font size inline per widget; use the named constants.
 - The theme default font size is `FS_BODY`.
@@ -58,6 +62,7 @@ are now head = body + 4, title = body + 6.)
 | Secondary text | `("gray40", "gray60")` (`CLR_SECONDARY`) | Secondary hints, card titles/details |
 | Tooltip background | `#3A3A3A` | Hover tooltips (text: theme dark-half) |
 | Orange | `orange` | Warnings and status messages |
+| Card / panel background | derived `_card_bg` (window step per mode) | Value cards, chart panel, watchlist — one shared bg so they read as boxes |
 | Red | `red` | Negative figures (always parenthesized, never a minus sign) |
 | Gray | `gray` | Secondary / display-only notes |
 
@@ -167,6 +172,14 @@ facts, the same way everywhere:
   only — never a background page over the visible one.
 - **One-path principle.** Exactly one way to reach any destination;
   no unnecessary buttons or menus.
+- **Sidebar: 170px fixed.** Bottom order: Appearance, Scaling, Refresh
+  stocks, Settings, then the « Collapse chevron (the » expand chevron
+  sits in the header, shown only while collapsed). Refresh lives in the
+  sidebar so every page reaches it; collapsing is geometry only —
+  scroll position and the current page are kept.
+- **Header: title + small-gray Total net worth line** (Overview only,
+  same line as the title); the status subtitle spans the full header
+  width below it.
 
 ## 6. Numbers, copy, and voice
 
@@ -186,9 +199,10 @@ facts, the same way everywhere:
 
 ## 7. Headings and structure
 
-- One headline number per view (the "Total net worth" line,
-  `TITLE_FONT_SIZE` bold). Section headings `FS_HEAD` bold. Table
-  headers `FS_TABLE_HEAD` bold.
+- The Total net worth figure lives in the header (small gray text
+  beside the title, Overview only — `TITLE_FONT_SIZE` no longer
+  applies to it); value-card values stay `FS_TITLE` bold. Section
+  headings `FS_HEAD` bold. Table headers `FS_TABLE_HEAD` bold.
 - Sidebar entry list (tutorial layout as-is, 2026-11-18): Overview,
   Accounts, Holdings, Liquidity, Tax, Diversification, Inputs,
   Template, Danger Zone, Utilities. Tax implications + Tax Harvest
@@ -201,6 +215,17 @@ facts, the same way everywhere:
 - CustomTkinter documentation (the library's own docs — widget
   parameters, appearance modes, color themes):
   <https://customtkinter.tomschimansky.com/>
+- The styling tutorial
+  (<https://customtkinter.tomschimansky.com/tutorial/styling>),
+  adopted as working rules (Prompt 13): light/dark **mode tuples**
+  `(light, dark)` resolved per mode at paint time; the **accent color
+  read from `ThemeManager.theme`** for the selected nav button; one
+  shared **`CTkFont`** per role; **`set_widget_scaling`** for the
+  scaling menu. tkinter widgets (`tk.Text`, canvas) sit outside the
+  theme system — their colors resolve to hex manually at paint time
+  (the `_to_hex` pattern), never hardcoded. Chart figures use the
+  **constrained layout engine** (solved on draw), never a manual
+  `tight_layout` pass.
 - The general tkinter / CustomTkinter best-practice consensus:
   centralize styles in one place; prefer theme colors over hardcoded
   hex; consistent spacing; one geometry manager per container;

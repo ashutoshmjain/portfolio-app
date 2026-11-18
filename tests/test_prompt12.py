@@ -57,9 +57,11 @@ class TestNavPages(unittest.TestCase):
         self.assertEqual(P.TITLE_FONT_SIZE, 26)
         self.assertEqual(P.VALUE_FONT_SIZE, 20)
 
-    def test_body_scale_unchanged(self):
+    def test_body_scale_prompt13(self):
+        # Superseded by Prompt 13 item 3: the compact scale is
+        # (10, 14, 10, 11) — body and headings down 2px.
         self.assertEqual((P.FS_BODY, P.FS_HEAD, P.FS_TABLE_HEAD,
-                          P.FS_SMALL), (12, 16, 12, 11))
+                          P.FS_SMALL), (10, 14, 10, 11))
 
     def test_secondary_theme_aware(self):
         self.assertEqual(P.CLR_SECONDARY, ("gray40", "gray60"))
@@ -162,7 +164,8 @@ class TestShellWidgets(unittest.TestCase):
         self.assertEqual(sb.grid_info()["column"], 0)
         # Tk canonicalizes the sticky order (nsew -> nesw).
         self.assertEqual(sb.grid_info()["sticky"], "nesw")
-        self.assertEqual(sb.cget("width"), 200)
+        # Superseded by Prompt 13 item 5: the sidebar narrows 200->170.
+        self.assertEqual(sb.cget("width"), 170)
         self.assertEqual(sb.cget("corner_radius"), 0)
 
     def test_names(self):
@@ -228,17 +231,12 @@ class TestShellWidgets(unittest.TestCase):
         self.assertIn("As of", app.header_sub.cget("text")
                       if hasattr(app.header_sub, "cget") else "")
 
-    def test_overview_refresh_only_here(self):
+    def test_refresh_not_in_headers(self):
+        # Superseded by Prompt 13 item 2: Refresh stocks moved to the
+        # sidebar so every page can reach it — no page header carries
+        # the button anymore (the sidebar test lives in test_prompt13).
         app = self.app
-        app.show_page("Overview")
-        app.update_idletasks()
-        top = [w for w in app.header_actions.winfo_children()
-               if "ctk_button" in str(type(w)).lower()
-               and w.cget("text") == "Refresh stocks"]
-        self.assertEqual(len(top), 1)
         for name in NAV_TEN:
-            if name == "Overview":
-                continue
             app.show_page(name)
             app.update_idletasks()
             acts = [w for w in app.header_actions.winfo_children()

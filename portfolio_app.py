@@ -48,18 +48,19 @@ def _n(n, one, many=None):
 
 
 # ---- app-wide type scale: ONE place, not scattered per-widget values ----
-# Compact dashboard scale (2026-11-18, user's call): body 12px, headings
+# Compact dashboard scale (2026-11-18, user's call): body 10px, headings
 # a few px above body, bold table headers at body size. Widgets without
 # an explicit font inherit FS_BODY via the theme default below, so buttons
-# and entries stay legible with no per-widget edits. NOTE: CTk sizes are
+# and entries stay usable with no per-widget edits. NOTE: CTk sizes are
 # pixels but tkinter renders points (px * 72/96), so these are chosen to
-# land exactly: 12px -> 9pt -> 12px, 16px -> 12pt -> 16px,
+# land exactly: 10px -> 7.5pt -> 10px, 14px -> 10.5pt -> 14px,
 # 18px -> 13.5pt -> 18px. Body text smaller than ~11px is fine ONLY when
 # it never wraps — single-line values the eye scans, never paragraphs.
-FS_BODY = 12          # body text, everywhere
-FS_HEAD = 16          # section headings (body + 4)
-FS_TITLE = 18         # top headline numbers
-FS_TABLE_HEAD = 12    # bold table headers
+FS_BODY = 10          # body text, everywhere
+FS_HEAD = 14          # section headings (body + 4)
+FS_TITLE = 18         # card values only (the Total net worth headline
+                      # moved into the header as small gray text)
+FS_TABLE_HEAD = 10    # bold table headers
 FS_SMALL = 11         # secondary hints only — never body text
 # Tutorial fonts, adopted as-is: the page header title + the Total net
 # worth headline use the title size; the sidebar title + value card
@@ -75,7 +76,7 @@ TEXT_COLOR = tuple(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
 PANEL_COLOR = tuple(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
 # Sidebar + main view, the tutorial's layout as-is: fixed 200px sidebar,
 # transparent main view with 20px padding.
-SIDEBAR_WIDTH = 200
+SIDEBAR_WIDTH = 170
 MAIN_PAD = 20
 # Sidebar pages, in sidebar order: the five Dashboard views +
 # Diversification + Tax Harvest + Data Entry's three + Utilities. Tax
@@ -145,6 +146,17 @@ def _lighter(hex_color, factor=1.4):
 def _cell_empty_bg(light):
     base = _to_hex(_theme_for_mode(PANEL_COLOR, light))
     return _lighter(base, 0.82 if light else 1.4)
+
+
+def _card_bg(light):
+    """Value-card/panel background: the window bg lightened one step in
+    dark mode, darkened one step in light mode (the tutorial's subtle
+    tonal step, resolved from the theme pair at paint time — never a
+    hardcoded color). Cards, the chart panel and the watchlist share
+    this one background so they read as boxes on the window."""
+    win = _theme_for_mode(tuple(ctk.ThemeManager.theme["CTk"]["fg_color"]),
+                          light)
+    return _lighter(_to_hex(win), 0.9 if light else 1.15)
 ctk.ThemeManager.theme["CTkFont"]["size"] = FS_BODY
 # Minimum canvas width (px) before a chart may lay out and draw. At cold
 # start the canvas reports transient near-zero widths while the window is
@@ -324,6 +336,7 @@ class SelectableMsg:
                           font.cget("weight"))
             except (tk.TclError, AttributeError, TypeError):
                 tkfont = None
+        self._font = font
         self._box = tk.Text(parent, wrap=wrap, width=20, height=1,
                             relief="flat", borderwidth=0,
                             highlightthickness=0, bg=bg, fg=fg,
@@ -417,6 +430,8 @@ class SelectableMsg:
     def cget(self, key):
         if key == "text":
             return self._text
+        if key == "font" and self._font is not None:
+            return self._font
         try:
             return self._box.cget(key)
         except tk.TclError:
@@ -529,10 +544,11 @@ class App(ctk.CTk):
             self.status_var.set(key_note)
 
         # ---- Sidebar shell (the tutorial's layout as-is) ----
-        # Root grid: sidebar fixed 200px at column 0, main view expands
+        # Root grid: sidebar fixed 170px at column 0, main view expands
         # at column 1. Nav buttons live in a scrollable frame so ten
         # entries never clip at short window heights; bottom holds the
-        # appearance + scaling menus and the Settings button.
+        # appearance + scaling menus, then Refresh stocks, then Settings
+        # — in that order — and the collapse chevron last.
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(1, weight=1)
         self.title_font = ctk.CTkFont(size=TITLE_FONT_SIZE, weight="bold")
@@ -541,11 +557,8 @@ class App(ctk.CTk):
                                     corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         ctk.CTkLabel(self.sidebar, text="Retirement Portfolio",
-                     font=self.value_font).pack(padx=MAIN_PAD, pady=(20, 4),
+                     font=self.value_font).pack(padx=MAIN_PAD, pady=(20, 8),
                                                 anchor="w")
-        ctk.CTkLabel(self.sidebar, text="All pages, one sidebar",
-                     text_color=CLR_SECONDARY).pack(padx=MAIN_PAD,
-                                                    pady=(0, 8), anchor="w")
         self.nav_scroll = ctk.CTkScrollableFrame(
             self.sidebar, fg_color="transparent")
         self.nav_scroll.pack(fill="both", expand=True,
@@ -560,12 +573,6 @@ class App(ctk.CTk):
                 command=lambda n=name: self.show_page(n))
             btn.pack(fill="x", padx=4, pady=2)
             self.nav_buttons[name] = btn
-        ctk.CTkButton(self.sidebar, text="Settings", anchor="w",
-                      height=32, fg_color="transparent",
-                      text_color=("gray10", "gray90"),
-                      hover_color=("gray75", "gray25"),
-                      command=self.open_settings).pack(
-                          fill="x", padx=14, pady=(4, 2))
         self.appearance_menu = ctk.CTkOptionMenu(
             self.sidebar, height=32,
             values=["System", "Light", "Dark"],
@@ -576,29 +583,66 @@ class App(ctk.CTk):
             self.sidebar, height=32,
             values=["80%", "90%", "100%", "110%", "120%"],
             command=self.change_scaling)
-        self.scaling_menu.pack(fill="x", padx=14, pady=(2, 14))
+        self.scaling_menu.pack(fill="x", padx=14, pady=2)
         self.scaling_menu.set("100%")
+        self.refresh_btn = ctk.CTkButton(
+            self.sidebar, text="Refresh stocks", anchor="w", height=32,
+            fg_color="transparent",
+            text_color=("gray10", "gray90"),
+            hover_color=("gray75", "gray25"),
+            command=self.refresh_async)
+        self.refresh_btn.pack(fill="x", padx=14, pady=2)
+        self.settings_btn = ctk.CTkButton(
+            self.sidebar, text="Settings", anchor="w",
+            height=32, fg_color="transparent",
+            text_color=("gray10", "gray90"),
+            hover_color=("gray75", "gray25"),
+            command=self.open_settings)
+        self.settings_btn.pack(fill="x", padx=14, pady=(2, 4))
+        # Collapse chevron: hides the sidebar; the expand chevron (in the
+        # header, shown only while collapsed) brings it back. Geometry
+        # only — scroll position and the current page are untouched.
+        self.collapse_btn = ctk.CTkButton(
+            self.sidebar, text="« Collapse", anchor="w", height=32,
+            fg_color="transparent",
+            text_color=("gray10", "gray90"),
+            hover_color=("gray75", "gray25"),
+            command=self.collapse_sidebar)
+        self.collapse_btn.pack(fill="x", padx=14, pady=(0, 14))
         # ---- Main view (transparent, 20px padding) ----
         self.main = ctk.CTkFrame(self, fg_color="transparent")
         self.main.grid(row=0, column=1, sticky="nsew", padx=MAIN_PAD,
                        pady=MAIN_PAD)
         self.main.grid_columnconfigure(0, weight=1)
         self.main.grid_rowconfigure(1, weight=1)
-        # Persistent header: page title (title size) + one gray subtitle
-        # line (FS_SMALL + CLR_SECONDARY) carrying the "As of <date>"
-        # date and the live status message. Actions (Overview's Refresh
-        # stocks + progress bar) fill the right box per page.
+        # Persistent header: page title (title size) + the Total net worth
+        # line (small gray text, same line — Overview only) + one gray
+        # subtitle line (FS_SMALL + CLR_SECONDARY) carrying the "As of
+        # <date>" date and the live status message. The subtitle spans
+        # the full header width (sticky ew + fill x), like the
+        # reference's full-width bar. The right box holds per-page
+        # actions (Overview: the progress bar); Refresh stocks lives in
+        # the sidebar so it reaches every page.
         head = ctk.CTkFrame(self.main, fg_color="transparent")
         head.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         head.grid_columnconfigure(0, weight=1)
         hleft = ctk.CTkFrame(head, fg_color="transparent")
-        hleft.grid(row=0, column=0, sticky="w")
+        hleft.grid(row=0, column=0, sticky="ew")
+        titlerow = ctk.CTkFrame(hleft, fg_color="transparent")
+        titlerow.pack(side="top", fill="x")
+        # Expand chevron: visible only while the sidebar is collapsed.
+        self.expand_btn = ctk.CTkButton(
+            titlerow, text="»", width=28, command=self.expand_sidebar)
         self.header_title = ctk.CTkLabel(
-            hleft, text="Overview", font=self.title_font)
-        self.header_title.pack(anchor="w")
+            titlerow, text="Overview", font=self.title_font)
+        self.header_title.pack(side="left")
+        self.header_net = SelectableMsg(titlerow, text="",
+                                        text_color=CLR_SECONDARY,
+                                        font=ctk.CTkFont(size=11))
+        self.header_net.pack(side="left", padx=(8, 0))
         self.header_sub = SelectableMsg(hleft, text="",
                                         text_color=CLR_SECONDARY)
-        self.header_sub.pack(anchor="w", fill="x")
+        self.header_sub.pack(side="left", fill="x", expand=True)
         self.header_actions = ctk.CTkFrame(head, fg_color="transparent")
         self.header_actions.grid(row=0, column=1, sticky="e")
         self.page = ctk.CTkFrame(self.main, fg_color="transparent")
@@ -677,6 +721,9 @@ class App(ctk.CTk):
                                self.cost_basis,
                                accounts=self.registry_accounts_arg(),
                                drift_start=start, drift_baseline=base)
+        # The header Total net worth line tracks the same recompute.
+        if getattr(self, "header_net", None) is not None:
+            self._refresh_header_net()
 
     def save_lots(self, msg="Data saved."):
         # File + main views only. Data Entry refresh is explicit at each
@@ -1137,9 +1184,10 @@ class App(ctk.CTk):
     def show_page(self, name):
         """Sidebar navigation (tutorial's selection pattern): accent the
         chosen nav button, set the header title, fill the right action
-        box (Overview gets Refresh stocks + the progress bar), and run
-        that page's builders. One path to every page — the tab bars and
-        hamburger menu are gone."""
+        box (Overview shows the progress bar while a refresh runs), and
+        run that page's builders. One path to every page — the tab bars
+        and hamburger menu are gone. Refresh stocks lives in the sidebar
+        so every page can reach it."""
         if name not in NAV_PAGES:
             return
         accent = ctk.ThemeManager.theme["CTkButton"]["fg_color"]
@@ -1163,14 +1211,46 @@ class App(ctk.CTk):
         except tk.TclError:
             pass
         self._refresh_subtitle()
+        self._refresh_header_net()
         if name == "Overview":
-            ctk.CTkButton(self.header_actions, text="Refresh stocks",
-                          command=self.refresh_async).pack(
-                              side="left", padx=4)
             self.refresh_bar.pack(side="left", padx=4)
         builder = self._page_builder(name)
         if builder is not None:
             builder()
+
+    def collapse_sidebar(self):
+        # Hide the sidebar; the main view spans both columns. Geometry
+        # only: no page rebuild, so scroll position and the current page
+        # are kept and no empty gap appears on reflow.
+        self.sidebar.grid_remove()
+        self.main.grid_configure(column=0, columnspan=2)
+        self.expand_btn.pack(side="left", padx=(0, 8))
+
+    def expand_sidebar(self):
+        # Bring the sidebar back; the main view returns to column 1.
+        # Explicit grid options: a bare .grid() does not re-show a
+        # grid_remove'd window.
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.main.grid_configure(column=1, columnspan=1)
+        self.expand_btn.pack_forget()
+
+    def _refresh_header_net(self):
+        # Total net worth beside the page title — Overview only, and only
+        # with positions (the empty-state rule hides portfolio numbers at
+        # zero positions). Small gray text, same line as the title.
+        if getattr(self, "header_net", None) is None:
+            return
+        try:
+            if (self.current_page == "Overview" and self.positions
+                    and getattr(self, "data", None)):
+                self.header_net.configure(
+                    text="Total net worth: %s"
+                    % money(self.data["tnw"]))
+                self.header_net.pack(side="left", padx=(8, 0))
+            else:
+                self.header_net.pack_forget()
+        except tk.TclError:
+            pass
 
     def _page_builder(self, name):
         return {"Overview": self.build_overview,
@@ -1598,6 +1678,10 @@ class App(ctk.CTk):
         body = ctk.CTkScrollableFrame(f)
         self._scroll_keep["overview"] = body
         body.pack(fill="both", expand=True)
+        # One shared panel background for this page: the four value cards,
+        # the chart panel and the watchlist all sit on card_bg (a subtle
+        # tonal step off the window bg, per mode) so they read as boxes.
+        card_bg = _card_bg(_mode_is_light(body))
         if not self.positions:
             # DATA-DRIVEN empty state: zero positions means no numbers, no
             # chart, no alerts — a home-only net worth or a vacuous
@@ -1616,20 +1700,16 @@ class App(ctk.CTk):
                           width=240,
                           command=self._goto_template).pack(
                               padx=10, pady=4, anchor="w")
-            self.build_watchlist(body)
+            self.build_watchlist(body, card_bg)
             return
-        tnw = self.data["tnw"]
         # Computed figures from live values — the radar as of today
-        # (prices/home at the last refresh), never entered numbers.
+        # (prices/home at the last refresh), never entered numbers. The
+        # Total net worth headline lives in the header now (small gray
+        # text beside the title); the body starts with spending.
         sp = pc.spending_capacity(self.profile, self.lots, self.prices)
         d = self.data["drift"]
         cap = sp["cap"]
         cap_note = (self.profile.get("cap_note") or "").strip()
-        SelectableMsg(body, text="Total net worth: %s" % money(tnw),
-                      font=ctk.CTkFont(size=FS_TITLE,
-                                       weight="bold")).pack(
-                                           padx=10, pady=(10, 2),
-                                           anchor="w", fill="x")
         SelectableMsg(
             body, text="Allowed spending (as of %s; prices/home at last "
                     "refresh): %s/yr before 65 (pool %s ÷ %s yrs) · "
@@ -1681,19 +1761,39 @@ class App(ctk.CTk):
         # by the user's call for elegance). The missing-cost line lives
         # on the Holdings tab, not here.
         self._overview_cards(body, pc.overview_cards(
-            d, sp, cap, cap_note, proj, med_figures))
+            d, sp, cap, cap_note, proj, med_figures), card_bg)
         # Primary visual: the Actual-vs-Standard daily-close LINE chart —
         # the same shared implementation (and values) as Diversification.
         # The allocation bar chart lives in Diversification only.
+        # Compact like the reference map: a small chart (~60%) with a
+        # controls panel (~40%) beside it, both on the shared card bg.
         from matplotlib.figure import Figure
-        fig = Figure(figsize=(10, 4.6), dpi=100)
+        fig = Figure(figsize=(10, 2.5), dpi=100)
         if pc.make_drift_chart(fig, pc.load_drift_log(DRIFT_LOG)):
-            self._chart_canvas(body, fig)
+            panel = ctk.CTkFrame(body, fg_color=card_bg)
+            panel.pack(fill="x", padx=10, pady=6)
+            panel.grid_columnconfigure(0, weight=3)
+            panel.grid_columnconfigure(1, weight=2)
+            chart_box = ctk.CTkFrame(panel, fg_color="transparent")
+            chart_box.grid(row=0, column=0, sticky="ew")
+            canvas = self._chart_canvas(chart_box, fig)
+            ctl = ctk.CTkFrame(panel, fg_color="transparent")
+            ctl.grid(row=0, column=1, sticky="new", padx=10, pady=10)
+            std_var = tk.BooleanVar(value=True)
+            std_lines = [ln for ax in fig.axes for ln in ax.get_lines()
+                         if str(ln.get_label()).startswith("Standard")]
+            ctk.CTkCheckBox(
+                ctl, text="Show standard", variable=std_var,
+                command=lambda: self._toggle_std_lines(
+                    canvas, std_lines, std_var)).pack(anchor="w", pady=2)
+            ctk.CTkButton(ctl, text="Save chart as PNG",
+                          command=lambda: self._save_fig(fig)).pack(
+                              anchor="w", pady=2)
         else:
             self._selectable_note(
                 body, "No drift data yet — press Log after a close to "
                       "start the history.", padx=10, pady=6, fill="x")
-        self.build_watchlist(body)
+        self.build_watchlist(body, card_bg)
         # RESERVED: Overview bottom area below the watchlist is held for
         # the FUTURE upcoming-events calendar (earnings calls and other
         # events for portfolio holdings) — related to the deferred news
@@ -1702,22 +1802,54 @@ class App(ctk.CTk):
         # build the calendar in this pass — this comment reserves the
         # space.
 
-    def _overview_cards(self, body, cards):
+    def _toggle_std_lines(self, canvas, lines, var):
+        # Show-standard toggle: line visibility only — the data, axes,
+        # legend and title are untouched.
+        for ln in lines:
+            try:
+                ln.set_visible(bool(var.get()))
+            except (ValueError, AttributeError):
+                pass
+        try:
+            canvas.draw_idle()
+        except (tk.TclError, ValueError):
+            pass
+
+    def _save_fig(self, fig):
+        # Save-as-PNG for a chart figure: file dialog only, no redraw,
+        # no data change.
+        path = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG image", "*.png")],
+            initialfile="chart.png")
+        if not path:
+            return
+        try:
+            fig.savefig(path, dpi=100)
+        except (OSError, ValueError) as e:
+            self.status_var.set("Could not save chart: %s"
+                                % type(e).__name__)
+            return
+        self.status_var.set("Chart saved to %s." % path)
+
+    def _overview_cards(self, body, cards, bg):
         # Shared card helper (climate-app tutorial's "Value cards"
         # layout): a transparent wrapper gridded with one equal uniform
         # column per card — no empty slot when Medi-Cal is inactive —
         # 20px gaps between cards, 20px of space below the row. Each card
-        # is a plain CTkFrame with three left-aligned CTkLabels and no
-        # icon: a small gray title, a large bold value, a small gray
-        # detail. CTkLabel, not SelectableMsg, by design: single-line
-        # card text never hits the centered-wrapped-lines defect (style
-        # guide §3 keep-list); the main summary lines stay selectable.
+        # sits on the shared card bg (a subtle tonal step off the window
+        # bg, per mode — never hardcoded) with three left-aligned
+        # CTkLabels and no icon: a small gray title, a large bold value,
+        # a small gray detail. CTkLabel, not SelectableMsg, by design:
+        # single-line card text never hits the centered-wrapped-lines
+        # defect (style guide §3 keep-list); the main summary lines stay
+        # selectable.
         wrap = ctk.CTkFrame(body, fg_color="transparent")
         wrap.pack(fill="x", padx=10, pady=(4, 20))
         for i in range(len(cards)):
             wrap.grid_columnconfigure(i, weight=1, uniform="cards")
         for i, card in enumerate(cards):
-            box = ctk.CTkFrame(wrap)
+            box = ctk.CTkFrame(wrap, fg_color=bg)
             box.grid(row=0, column=i, sticky="ew",
                      padx=(0, 20) if i < len(cards) - 1 else (0, 0))
             ctk.CTkLabel(box, text=card["title"],
@@ -1751,10 +1883,12 @@ class App(ctk.CTk):
             return "Gold (above-ground stock) · %s total" % total_txt
         return "%s · %s total" % (name, total_txt)
 
-    def build_watchlist(self, body):
+    def build_watchlist(self, body, bg):
         # Market data, not portfolio data: always shown — even with zero
         # positions (the empty-state rule hides net worth, spending, drift
-        # and alerts, never this). Prices update ONLY on Refresh stocks,
+        # and alerts, never this). Tables sit on the shared card bg so
+        # the watchlist reads as panels like the cards and the chart.
+        # Prices update ONLY on Refresh stocks,
         # the same fetch cycle as portfolio prices; cached quotes show
         # before the first refresh. No polling, no separate refresh.
         # Standard classes are fixed content in code; user-defined classes
@@ -1765,7 +1899,7 @@ class App(ctk.CTk):
                           padx=10, pady=(10, 2), anchor="w", fill="x")
         for name, tickers in self.watch_classes():
             standard = name in pc.WATCHLIST_CLASSES
-            self._watch_class_section(body, name, tickers, standard)
+            self._watch_class_section(body, name, tickers, standard, bg)
         # New user-defined class: an asset class is a named watchlist.
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(6, 2))
@@ -1780,7 +1914,7 @@ class App(ctk.CTk):
                       command=lambda: self._watch_new_class(
                           cls_var.get(), cmsg)).pack(side="left", padx=4)
 
-    def _watch_class_section(self, body, name, tickers, standard):
+    def _watch_class_section(self, body, name, tickers, standard, bg):
         # Every class owns its controls. Standard classes (fixed content
         # in code) show no edit controls at all — a "standard" note only.
         # A user class carries its Add ticker row, per-ticker Remove
@@ -1795,8 +1929,8 @@ class App(ctk.CTk):
             ctk.CTkLabel(head, text="standard",
                          text_color=CLR_SECONDARY).pack(side="left", padx=8)
             Table(body, pc.WATCH_HEADERS,
-                  [self._watch_row(t) for t in tickers]
-                  ).pack(fill="x", padx=10, pady=4)
+                  [self._watch_row(t) for t in tickers],
+                  fg_color=bg).pack(fill="x", padx=10, pady=4)
             return
         ctk.CTkButton(head, text="Delete class", width=110,
                       command=lambda: self._watch_delete_class(
@@ -1805,7 +1939,7 @@ class App(ctk.CTk):
                       command=lambda: self._copy_watch_class(
                           name, tickers)).pack(side="right", padx=4)
         for t in tickers:
-            self._watch_ticker_row(body, name, t)
+            self._watch_ticker_row(body, name, t, bg)
         row = ctk.CTkFrame(body, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=2)
         ctk.CTkLabel(row, text="Add ticker to %s:" % name).pack(
@@ -1820,12 +1954,12 @@ class App(ctk.CTk):
                           name, add_var.get(), wmsg)).pack(side="left",
                                                            padx=4)
 
-    def _watch_ticker_row(self, body, classname, t):
+    def _watch_ticker_row(self, body, classname, t, bg):
         # Seven columns + Remove, sized to fit ~960px split-screen with no
         # horizontal scrollbar: historical prices take the Price column's
         # width or narrower; PEG is a short number.
         vals = self._watch_row(t)
-        row = ctk.CTkFrame(body)
+        row = ctk.CTkFrame(body, fg_color=bg)
         row.pack(fill="x", padx=10, pady=1)
         for col, (txt, w) in enumerate(
                 [(vals[0], 70), (vals[1], 90), (vals[2], 90),

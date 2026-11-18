@@ -1,6 +1,52 @@
 # Prompt 13 — Design aesthetics: the landing page
 
-Status: DRAFT
+Status: BUILT 2026-11-18 — all ten items done, full suite 60/60 green,
+headless probe OK (withdrawn root, no mainloop). Per-item report:
+
+- Item 1 (status full-width bar): header left cell is sticky ew and
+  the status subtitle packs side=left + fill=x + expand, so it spans
+  the full header width. Same text (test a).
+- Item 2 (Refresh to sidebar): "Refresh stocks" button in the sidebar
+  between Scaling and Settings (bottom order Appearance, Scaling,
+  Refresh, Settings); no header on any page carries one (tests b, c;
+  prompt-12 refresh test rewritten to the new contract).
+- Item 3 (type scale -2px): FS_BODY 10, FS_HEAD 14, FS_TABLE_HEAD 10;
+  card values stay FS_TITLE 18 (test d; prompt-11/12 scale tests
+  updated to the new contract).
+- Item 4 (no sidebar subtitle): the "All pages, one sidebar" label is
+  gone — the sidebar title stands alone, like the reference.
+- Item 5 (narrow 170): SIDEBAR_WIDTH 170; every nav button fits in
+  156px at the smaller font (test e).
+- Item 6 (collapse/expand): « Collapse chevron at the sidebar bottom;
+  collapse hides the sidebar and spans the main view both columns,
+  » in the header restores it. Geometry only — no rebuild, scroll +
+  current page kept, no empty gap (test f). Fixed a real bug found by
+  the test: expand re-grids with explicit options (bare .grid() does
+  not re-show a grid_remove'd window).
+- Item 7 (cards read as boxes): value-card frames sit on the shared
+  card bg — the window bg lightened (dark mode) / darkened (light
+  mode), resolved per mode, never hardcoded (test g both modes).
+- Item 8 (chart + Watchlist share it): the chart panel and the
+  watchlist tables/ticker rows sit on the same card bg — 4 cards +
+  chart panel + 3 standard tables share one color (test h).
+- Item 9 (Total net worth in header): the body headline is gone; the
+  header title row carries "Total net worth: $…" in small gray 11px
+  beside the title (Overview only, hidden at zero positions and on
+  other pages). 11px is the single allowed numeric font literal
+  (test i; prompt-11 literal test updated).
+- Item 10 (compact chart + controls): figsize (10, 2.5); chart panel
+  grids ~60/40 (weight 3/2) with a controls panel holding a checked
+  "Show standard" toggle (line visibility only — data/axes/legend/
+  title untouched) and "Save chart as PNG" (file dialog + savefig,
+  no redraw). Both controls survive collapse/expand and page switch
+  (test j; figsize source test k).
+- Guide §8 augmented from the styling tutorial (mode tuples,
+  ThemeManager accent, shared CTkFont, set_widget_scaling, manual
+  tk color resolution, constrained layout); guide type scale, colors
+  (§2 card-bg row), layout (§5 sidebar/header), and headings (§7)
+  updated; README sidebar/Overview/scale sections updated.
+- Manual launch-check (full + 960px split-screen, Light/Dark cards
+  and panels, collapse/expand, chart controls) is the owner's step.
 
 ## Context
 
