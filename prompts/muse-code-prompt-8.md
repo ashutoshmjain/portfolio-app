@@ -1,6 +1,6 @@
 # Prompt 8 — Plugin utilities (framework + Medical plugin, base) + the two Delta 6 fixes
 
-Status: DRAFT — ready to close.
+Status: BUILT — commit `005e1c4` on main (2026-11-18). All four items delivered: plugin framework (`plugins/`, loader, Utilities tab, Settings section), Medical base plugin, Overview wrap fixes, drift bullet reword + pp unit. Verified: 28/28 committed tests pass (incl. new `test_plugin_loader.py`, `test_medical.py`) + 15-check headless probe ALL PASS. GUI launch-check (Utilities show/hide, projected figures, split-screen lines) is the owner's manual step. Deferred items (submission letter, checklist, Capital Gains Forms, projected-gains MAGI hook) unchanged — still later.
 
 This prompt builds the plugin utilities framework with the Medical plugin as the first, base version, and folds in the two minor fixes from Prompt 7 Delta 6 (which is superseded by this prompt — do not build Delta 6 separately).
 
