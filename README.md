@@ -1,4 +1,4 @@
-# Portfolio Dashboard — Windows desktop app
+# Retirement Portfolio — Windows desktop app
 
 Local replacement for the Google Sheets portfolio dashboard. No Google
 sign-in, no API quirks, no chart-editor limits: everything runs on your
@@ -6,15 +6,13 @@ Windows PC.
 
 ## What it shows
 
-Top-level tabs, in order: **Dashboard, Diversification, Tax Harvest,
-Data Entry.** The ☰ menu holds four items: Refresh stocks,
-Refresh home estimates, Log, Settings.
+Sidebar pages, in order: **Overview, Accounts, Holdings, Liquidity, Tax, Diversification, Inputs, Template, Danger Zone, Utilities.** The Overview header holds one button: Refresh stocks (which also logs closes to the drift log). The sidebar bottom holds the appearance + scaling menus and Settings.
 
-- **Dashboard** — sub-tabs: **Overview** (landing: net worth, COMPUTED
+- **Overview** (landing page: net worth, COMPUTED
   spending radar — before-65 pool ÷ whole years to 65, IRAs ÷ 20, Social
   Security all-in, realizable figure, Medi-Cal MAGI status + headroom and
   the after-65 AGI guardrail, all as of today at last-refresh prices —
-  key alerts, a Copy summary button, then the Actual-vs-Standard
+  four value cards (drift, Medi-Cal when active, gains headroom, after-65 AGI guardrail), then the Actual-vs-Standard
   daily-close LINE chart — blue Actual total $, red Standard total $,
   $2M–$5M / $100K steps, same shared implementation and values as
   Diversification; then the watchlist — standard asset classes
@@ -35,8 +33,7 @@ Refresh home estimates, Log, Settings.
   Add accepts a company name too — it resolves via the price feed's symbol
   search, shows the matches for picking, and the row keeps the resolved
   name ("SQ — Block Inc.");
-  columns Ticker | Price | Market cap ($T), prices updating only on Refresh
-  stocks; the bottom area is reserved for the future upcoming-events
+  columns Ticker | Price | Week | Month | Quarter | Market cap ($T) | PEG, prices and backdated prices updating only on Refresh stocks; the bottom area is reserved for the future upcoming-events
   calendar),
   **Accounts** (bank → account → position
   quantities, prices, values — data-driven from lots + the account
@@ -48,10 +45,7 @@ Refresh home estimates, Log, Settings.
   gains read `--`, per account in the ▶/▼ expansion too; home is one row
   per property labeled RE 1, RE 2 (never the full address — the row's
   numbers stay aligned; the legend below the table maps RE N to the
-  address); a TOTAL row (total value + total gains, positions + home,
-  cash excluded; gains total shows only when every row is computable)
-  closes the table and ties to Overview net worth; cash lives in
-  Liquidity),
+  address); a TOTAL row (total value + total gains, positions + cash + home; gains total shows only when every row is computable) closes the table and ties to Overview net worth; cash is a row like any other ticker and its dropdown groups by institution),
   **Liquidity** (the sheet's Liquidity Plan tab, framed by TRUE access age:
   ONE row per institution — Chase/chase unified case-insensitively — with
   Available now / Unlocks at 59½ (date from the Settings date of birth) /
@@ -60,8 +54,6 @@ Refresh home estimates, Log, Settings.
   total, home, net worth, and years of pre-65 spending covered by
   available-now money; 65 appears nowhere on this tab — it stays a
   spending/SS milestone on Overview only),
-  **Tax implications** (per-type tax facts, not advice, + your
-  account→type mapping).
   Every view that lists money shows a total: Holdings and Diversification
   bucket tables carry TOTAL rows tying to net worth, the Tax Harvest losers
   table totals Value $ / Unrealized P&L $ (unknown columns read `--`, never
@@ -71,32 +63,28 @@ Refresh home estimates, Log, Settings.
   chart, no alerts: only "No data yet — add your first bank / account, or
   upload a filled template" with those two actions as buttons. A fresh copy
   ships blank defaults (no personal values in the code) — fill in
-  Settings (☰ menu, including Properties for the home address) and pull
-  the home estimate via ☰ → Refresh home estimates.
+  Settings (sidebar bottom, including Properties for the home address); home value is typed in manually.
 - **Diversification** — the 15:15:35:15:20 standard + rationale, current
   position vs standard, the Target-vs-actual allocation bar chart (this tab
   only), rebalance plan (display only — NEVER executes trades), and the
   same Actual-vs-Standard drift line chart as Overview (one shared
   implementation — values tie exactly; Y-axis $2M–$5M, $100K steps — the
   chart Google Sheets flattened).
-- **Tax Harvest** (view title "Tax Loss Harvesting") — per-lot unrealized
+- **Tax** — the account-type tax facts and your account→type mapping sit above the Tax Loss Harvesting content: per-lot unrealized
   P&L with Long/Short holding term, realized gains from closed lots, and a
   DERIVED annual net-gains cap (Medi-Cal MAGI ceiling minus other annual
   income — blank ceiling = no cap) with leeway math; the ceiling, the
   other income, and the cap note live in Settings.
-- **Data Entry** (last) — sub-tabs Inputs / Template /
-  Danger Zone (see below). Profile moved to Settings under the ☰ menu
-  (Refresh stocks, Refresh home estimates, Log, Settings).
-- **Utilities** (appears only when at least one plugin is enabled —
-  hidden otherwise) — one sub-tab per enabled plugin. **Medi-Cal** (base
+- **Inputs / Template / Danger Zone** (Data Entry pages, see below). Profile moved to Settings at the sidebar bottom.
+- **Utilities** (always present) — a Plugins tab listing every discovered plugin with its enable control, plus one sub-tab per enabled plugin. **Medi-Cal** (base
   version): project expected annual W-2 / pension / interest / dividends /
   capital gains; answers "Do you qualify for Medi-Cal?" with a verdict
   from the projection against the MAGI ceiling setting. While enabled,
   the projected "other" plugs into the Overview's headroom (labeled
-  "(projected)") and the Overview shows a Medi-Cal verdict bullet (only
+  "(projected)") and the Overview shows a Medi-Cal value card (only
   when the plugin is activated, never by default); disabling restores the
   manual lump value. Projected gains are display-only — the actual realized
-  gains (Tax Harvest tab) stay the source of truth. A utility is one file
+  gains (Tax page) stay the source of truth. A utility is one file
   under `plugins/` plus the loader contract — no core rewrite; a broken
   plugin is skipped with a console note, never a startup crash.
 
@@ -116,7 +104,7 @@ future upcoming-events calendar for portfolio holdings.)
   Template messages, watchlist messages, Inputs progress/warnings, the
   status bar. No message in the app is copy-proof (native file dialogs
   aside).
-- Overview has a **Copy summary** button (net worth, spending, alerts).
+- Overview summary lines are selectable text (drag to select, Ctrl+C) — no one-click button, by the user’s call for elegance.
   Holdings, Liquidity, and the Inputs grid each have a **Copy table** /
   **Copy grid** button: TSV to the clipboard, pasting straight into Excel,
   Sheets, or any AI chat.
@@ -211,10 +199,10 @@ bank,account,account_type,asset,shares,cost_per_share,acquired_date,sold_date,sa
   ships NEUTRAL blanks — no personal values
   are seeded in the code; the user fills these in Settings (☰ menu).
 
-## Data Entry (last tab)
+## Data Entry pages
 
-Sub-tabs Inputs / Template / Danger Zone — the tab bar is the
-only navigation (the ☰ menu opens no window).
+Inputs / Template / Danger Zone are sidebar pages — the sidebar is the
+only navigation.
 
 - **Inputs** — OPENS on the guided one-account view by default (first
   account with required gaps, taxable first; the guided panel's "Show all"
@@ -289,7 +277,7 @@ only navigation (the ☰ menu opens no window).
   liquid total and net worth must match. The template carries positions,
   not prices (the clone fetches its own) and not home value (set it
   identically in the clone).
-- **Settings** (☰ menu dialog, formerly the Profile sub-tab) — date of
+- **Settings** (sidebar-bottom dialog, formerly the Profile sub-tab) — date of
   birth, SS amounts, Medi-Cal MAGI ceiling $/yr (blank = no cap derived),
   other annual income $/yr (W-2/pension), employer medical cover yes/no
   (MAGI section N/A when on), private insurance $/person/mo, after-65
@@ -304,10 +292,7 @@ only navigation (the ☰ menu opens no window).
   Refresh popup offers an Open Settings button)
   (all blank by default — the user fills them in). Shows the computed
   spending radar (as of today): before-65 pool ÷ yrs, after-65 IRAs ÷ 20 +
-  SS = all-in, realizable figure, age, turn-65 date. A **Utilities**
-  section lists each discovered plugin (title, one-line description,
-  checkbox) — checked = enabled; enabling the first plugin makes the
-  Utilities tab appear, disabling the last one hides it. Save/Cancel
+  SS = all-in, realizable figure, age, turn-65 date. Plugin activation moved to the always-present Utilities page: its Plugins tab lists each discovered plugin (title, one-line description, checkbox) — checked = enabled; Save applies the change and the new sub-tabs appear, with each plugin’s write-back landing in the same save + recompute. Save/Cancel
   live in a fixed footer that never scrolls away; the dialog never exceeds
   the viewport height; **Export settings** / **Import settings** in the
   footer move the whole settings file (`settings-YYYYMMDD-HHMM.json`,
@@ -340,7 +325,7 @@ only navigation (the ☰ menu opens no window).
   available via the guided panel's "Show all" (the single path — the header
   row carries no duplicate).
 
-## Position lifecycle (Accounts tab buttons + Coverage grid)
+## Position lifecycle (Accounts page buttons + Coverage grid)
 
 Record-keeping language throughout: this app places no orders and connects
 to no brokerage — every action records something that already happened at
@@ -389,25 +374,21 @@ the brokerage.
 
 ## Daily use
 
-- **Record buys/sells**: use the Accounts tab buttons (Add / Sold / Mark
+- **Record buys/sells**: use the Accounts page buttons (Add / Sold / Mark
   closed), edit the Inputs grid, or fill a template and upload it. Then
-  ☰ → Refresh stocks.
+  press Refresh stocks on the Overview page (it also logs closes to
+  the drift log).
 - **Home value**: Settings → Properties (address + applied value per
   property; the applied value flows into Holdings, net worth and drift;
-  Holdings shows one row per property). ☰ → Refresh home estimates pulls
-  the RentCast estimate per property (free Developer key in Settings) and
-  SHOWS value + source + date — accepting or typing a value and saving is
-  what applies it; nothing is silently replaced. No key: Refresh shows a
-  plain hint. Redfin/Zillow enter via the manual applied value (no
-  scrapers). RentCast is called ONLY on explicit Refresh — 50 calls/month
-  free tier; remaining quota shows when the API reports it. A stored key
+  Holdings shows one row per property). Check Zillow/Redfin in the
+  browser and type the number — nothing is silently replaced. The
+  RentCast key stays stored in Settings for a future fetch path. A stored key
   that looks like an address (typed into the wrong field before validation
   existed — the usual cause of a 401) is healed on load: moved to
   Properties as the home address when none exists, else cleared, with a
   status note; the fetcher itself never burns a call on an address-like
   key.
-- **Log** (☰ menu): appends today's close to `drift_log.csv`
-  (skips weekends, like the old daily cron). Upserts if run twice.
+- **Drift log**: every Refresh stocks automatically appends today's close to `drift_log.csv` (upsert by date; skips weekends, like the old daily cron). No menu entry — refresh autos.
 - **Cost basis**: fill cost + acquired date per lot (Inputs grid or
   template) to activate P&L, holding terms, and harvest rankings. Never
   invent basis — leave blank until you pull it from the broker.

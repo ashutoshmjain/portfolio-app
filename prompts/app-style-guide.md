@@ -38,6 +38,14 @@ until a prompt fixes it — unless the user has said otherwise.
 18, body 12, superseding the earlier "body ≥ 15px" minimum. The steps
 are now head = body + 4, title = body + 6.)
 
+> **Tutorial mapping (adopted as-is, 2026-11-18).** The sidebar shell
+> follows the climate-app tutorial's layout with its own sizes: the
+> tutorial **title size (26, bold)** is used for the page header title
+> AND the Total net worth headline; the tutorial **value size (20,
+> bold)** is used for the "Retirement Portfolio" sidebar title AND the
+> value-card values. Those two sizes are the only inline font sizes
+> this app carries — everything else uses the constants above.
+
 - Never set a font size inline per widget; use the named constants.
 - The theme default font size is `FS_BODY`.
 
@@ -45,14 +53,19 @@ are now head = body + 4, title = body + 6.)
 
 | Role | Value | Use |
 |---|---|---|
-| Panel / note background | `#2B2B2B` | Selectable text blocks, notes |
-| Default text | `#EDEDED` | All body text |
-| Tooltip background | `#3A3A3A` | Hover tooltips (text `#EDEDED`) |
+| Panel / note background | theme `CTkFrame` pair (`PANEL_COLOR`) | Selectable text blocks, notes — resolved per mode |
+| Default text | theme `CTkLabel` pair (`TEXT_COLOR`) | All body text — resolved per mode |
+| Secondary text | `("gray40", "gray60")` (`CLR_SECONDARY`) | Secondary hints, card titles/details |
+| Tooltip background | `#3A3A3A` | Hover tooltips (text: theme dark-half) |
 | Orange | `orange` | Warnings and status messages |
 | Red | `red` | Negative figures (always parenthesized, never a minus sign) |
 | Gray | `gray` | Secondary / display-only notes |
 
 - Never hardcode a new color for a one-off; use the named roles above.
+  The old `#2B2B2B` / `#EDEDED` literals are gone: primary text and
+  panel backgrounds resolve from the theme pairs at widget creation
+  (a page rebuild picks up a mode switch), so Light mode renders with
+  dark text on light panels with no per-widget branch.
 - Disabled labels in dark mode can show a distracting white grid in
   CustomTkinter — avoid `state="disabled"` on labels; grey out with
   color instead (see §4).
@@ -90,12 +103,14 @@ default — and it makes the text selectable.
      (a table can be hundreds of cells). The tables already carry a
      "Copy table" button (TSV), so per-cell selection adds little.
   2. Layout spacers / markers — empty `width=30` labels, the "●" dot.
-  3. Overview value cards — three stacked `CTkLabel`s per card (small
-     gray title, large bold value, small gray detail). The card text
-     is short and single-line by design, so the centered-wrapped-lines
-     defect does not apply (see §7). Trade-off, stated: the card
-     figures are view-only; the main summary lines stay `SelectableMsg`
-     and copyable.
+  3. Sidebar shell labels — the "Retirement Portfolio" title, the
+     subtitle, nav buttons, bottom menus, and the per-page header title
+     (the tutorial's labels as-is). Overview value cards likewise stay
+     `CTkLabel` by design (see the tutorial box below): three stacked
+     labels per card. Card text is short and single-line by design, so
+     the centered-wrapped-lines defect does not apply (see §7).
+     Trade-off, stated: the card figures are view-only; the main
+     summary lines stay `SelectableMsg` and copyable.
 - **Controls are not text.** Buttons, entries, combos, checkboxes,
   switches, and tab names stay their own widget types.
 - Long text wraps at the container width and reflows on resize.
@@ -117,6 +132,12 @@ facts, the same way everywhere:
   cells beside them) and any editable/display cell pair. Inside an
   editable grid, a computed display value (account total, "Closed"
   marker, a computed note) is filled + non-editable, so it greys out.
+- **Table titles sit at the table's top-left corner.** Every table
+  header across the app (the `Table` class and every hand-built header
+  row) renders plain (not bold-underlined), left-aligned
+  (`anchor="w"` / `sticky="w"`), never centered. (The tutorial's
+  headers are plain `CTkLabel`s; ours keeps the established bold
+  headers — that mismatch is recorded and deliberate.)
 - **Record tables are the exception.** The read-only tables
   (Holdings, Accounts, Liquidity, Tax Harvest) are the record itself —
   their data cells render in the normal text color, because greying
@@ -141,6 +162,9 @@ facts, the same way everywhere:
 - **One view = one scrollbar.** Tables render at their full content
   height inside the view's single scroll region; no table carries its
   own scrollbar.
+- **One page shows at a time.** The sidebar shell builds a single page
+  into one content frame; data operations rebuild the current page
+  only — never a background page over the visible one.
 - **One-path principle.** Exactly one way to reach any destination;
   no unnecessary buttons or menus.
 
@@ -163,12 +187,14 @@ facts, the same way everywhere:
 ## 7. Headings and structure
 
 - One headline number per view (the "Total net worth" line,
-  `FS_TITLE` bold). Section headings `FS_HEAD` bold. Table headers
-  `FS_TABLE_HEAD` bold.
-- Tabs: Dashboard, Diversification, Tax Harvest, Data Entry (LAST).
-  No Retirement tab. Utilities appears only when ≥1 plugin is enabled.
-- Dashboard sub-tabs: Overview, Accounts, Holdings, Liquidity, Tax
-  implications. Data Entry sub-tabs: Inputs, Template, Danger Zone.
+  `TITLE_FONT_SIZE` bold). Section headings `FS_HEAD` bold. Table
+  headers `FS_TABLE_HEAD` bold.
+- Sidebar entry list (tutorial layout as-is, 2026-11-18): Overview,
+  Accounts, Holdings, Liquidity, Tax, Diversification, Inputs,
+  Template, Danger Zone, Utilities. Tax implications + Tax Harvest
+  merged into one "Tax" page; Utilities is always present. No
+  Retirement page. One path to every page — the tab bars and hamburger
+  menu are gone.
 
 ## 8. References — what this guide is built on
 

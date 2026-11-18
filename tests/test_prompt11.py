@@ -54,8 +54,12 @@ class TestTypeScale(unittest.TestCase):
 
 class TestHeaderTitle(unittest.TestCase):
     def test_portfolio(self):
-        self.assertIn('text="Portfolio"', APP)
+        # Superseded by Prompt 12 item 3: the old top-banner "Portfolio"
+        # label is gone with the hamburger bar; the window and the
+        # sidebar title now read exactly "Retirement Portfolio".
+        self.assertIn('text="Retirement Portfolio"', APP)
         self.assertNotIn("PORTFOLIO DASHBOARD", APP)
+        self.assertNotIn('text="Portfolio",', APP)
 
 
 class TestWatchlistHeaders(unittest.TestCase):

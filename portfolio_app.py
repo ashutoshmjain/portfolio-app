@@ -61,9 +61,65 @@ FS_HEAD = 16          # section headings (body + 4)
 FS_TITLE = 18         # top headline numbers
 FS_TABLE_HEAD = 12    # bold table headers
 FS_SMALL = 11         # secondary hints only — never body text
-# Secondary text on dark: light enough to read at body size (never tiny +
-# dim). Body text itself is always the default light color, never this.
-CLR_SECONDARY = "#C9C9C9"
+# Tutorial fonts, adopted as-is: the page header title + the Total net
+# worth headline use the title size; the sidebar title + value card
+# values use the value size. (Sizes in points, as the tutorial sets
+# them — the only size literals this prompt adds.)
+TITLE_FONT_SIZE = 26
+VALUE_FONT_SIZE = 20
+# Theme-aware colors (light, dark) following the tutorial's GRAY_TEXT_COLOR
+# pattern. Concrete hex is read out of the theme at runtime — no hardcoded
+# dark color survives a switch to Light mode.
+CLR_SECONDARY = ("gray40", "gray60")
+TEXT_COLOR = tuple(ctk.ThemeManager.theme["CTkLabel"]["text_color"])
+PANEL_COLOR = tuple(ctk.ThemeManager.theme["CTkFrame"]["fg_color"])
+# Sidebar + main view, the tutorial's layout as-is: fixed 200px sidebar,
+# transparent main view with 20px padding.
+SIDEBAR_WIDTH = 200
+MAIN_PAD = 20
+# Sidebar pages, in sidebar order: the five Dashboard views +
+# Diversification + Tax Harvest + Data Entry's three + Utilities. Tax
+# implications + Tax Harvest merge into "Tax" (Item 8); Utilities is
+# always present (Item 9).
+NAV_PAGES = ["Overview", "Accounts", "Holdings", "Liquidity", "Tax",
+             "Diversification", "Inputs", "Template", "Danger Zone",
+             "Utilities"]
+
+
+def _to_hex(color):
+    """A theme color (hex or grayNN name) as #RRGGBB. tk.Text needs a real
+    color; grayNN names resolve arithmetically (percent of white), hex
+    passes through, anything else returns as-is for Tk to resolve."""
+    if isinstance(color, str) and color.startswith("#") \
+            and len(color) == 7:
+        return color
+    if isinstance(color, str) and color.startswith("gray"):
+        try:
+            v = round(int(color[4:]) / 100 * 255)
+        except ValueError:
+            return color
+        return "#%02X%02X%02X" % (v, v, v)
+    return color
+
+
+def _mode_is_light(widget):
+    """Effective appearance mode for a widget's window. Falls back to the
+    global setting (treats System as dark) when the window is gone."""
+    try:
+        return widget.winfo_toplevel()._get_appearance_mode() == "Light"
+    except (tk.TclError, AttributeError):
+        try:
+            return ctk.get_appearance_mode() == "Light"
+        except Exception:  # noqa: BLE001 - theme always answers
+            return False
+
+
+def _theme_for_mode(pair, light):
+    """The mode-appropriate half of a (light, dark) theme pair."""
+    try:
+        return pair[0] if light else pair[1]
+    except (IndexError, TypeError):
+        return pair
 
 
 def _lighter(hex_color, factor=1.4):
@@ -81,10 +137,14 @@ def _lighter(hex_color, factor=1.4):
     return "#%02X%02X%02X" % (r, g, b)
 
 
-# Empty editable cell: the dark panel bg (#2B2B2B, the canvas every grid
-# row sits on) lightened one step. Filled cells read normal; filled
-# display-only cells grey out via CLR_SECONDARY instead of a bg shade.
-CELL_EMPTY_BG = _lighter("#2B2B2B")
+# Empty editable cell: the current panel bg lightened one step in dark
+# mode, darkened one step in light mode (via the same helper, factor
+# below 1). Filled cells read normal; filled display-only cells grey
+# out via CLR_SECONDARY instead of a bg shade. Computed per paint from
+# the theme pair — no hardcoded panel color.
+def _cell_empty_bg(light):
+    base = _to_hex(_theme_for_mode(PANEL_COLOR, light))
+    return _lighter(base, 0.82 if light else 1.4)
 ctk.ThemeManager.theme["CTkFont"]["size"] = FS_BODY
 # Minimum canvas width (px) before a chart may lay out and draw. At cold
 # start the canvas reports transient near-zero widths while the window is
@@ -247,8 +307,16 @@ class SelectableMsg:
     # conversion one line.
     def __init__(self, parent, text="", text_color=None, wraplength=None,
                  font=None, textvariable=None, wrap="word", anchor=None):
-        fg = {"orange": "orange", "red": "red"}.get(
-            text_color, "#EDEDED" if text_color is None else text_color)
+        # Theme-aware: the default text/panel colors resolve from the
+        # theme pairs for the current mode (a rebuilt page picks up a
+        # mode switch); tuples are resolved to hex for tk.Text.
+        light = _mode_is_light(parent)
+        if text_color is None:
+            fg = _to_hex(_theme_for_mode(TEXT_COLOR, light))
+        else:
+            fg = _to_hex(_theme_for_mode(text_color, light)) \
+                if isinstance(text_color, (tuple, list)) else text_color
+        bg = _to_hex(_theme_for_mode(PANEL_COLOR, light))
         tkfont = None
         if font is not None:
             try:
@@ -258,11 +326,11 @@ class SelectableMsg:
                 tkfont = None
         self._box = tk.Text(parent, wrap=wrap, width=20, height=1,
                             relief="flat", borderwidth=0,
-                            highlightthickness=0, bg="#2B2B2B", fg=fg,
+                            highlightthickness=0, bg=bg, fg=fg,
                             cursor="xterm",
                             font=tkfont or ("Roboto", -FS_BODY),
                             spacing1=2, spacing3=4,
-                            insertbackground="#EDEDED")
+                            insertbackground=fg)
         self._text = ""
         self._var = textvariable
         if textvariable is not None:
@@ -328,8 +396,14 @@ class SelectableMsg:
             self.set(kw.pop("text"))
         if "text_color" in kw:
             colour = kw.pop("text_color")
+            if colour is None:
+                colour = _to_hex(_theme_for_mode(
+                    TEXT_COLOR, _mode_is_light(self._box)))
+            elif isinstance(colour, (tuple, list)):
+                colour = _to_hex(_theme_for_mode(
+                    colour, _mode_is_light(self._box)))
             kw["fg"] = {"orange": "orange", "red": "red"}.get(
-                colour, "#EDEDED" if colour is None else colour)
+                colour, colour)
         if not kw and cnf is None:
             return
         try:
@@ -418,7 +492,7 @@ class Table(ctk.CTkFrame):
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Portfolio Dashboard")
+        self.title("Retirement Portfolio")
         self.geometry("1240x860")
         self.lots = pc.load_portfolio(PORTFOLIO_CSV)
         self.profile = pc.load_profile(PROFILE_JSON)
@@ -439,7 +513,7 @@ class App(ctk.CTk):
             print("plugin: %s" % note)
         self.util_tabs = None
         self._utility_pids = None
-        self._utilities_present = False
+        self._util_vars = None
         self.data = None
         self.cov_lots = None
         # Live scroll regions by stable key (re-registered on every build;
@@ -449,36 +523,89 @@ class App(ctk.CTk):
         # the worker runs gets an instant "sit tight" instead of a
         # duplicate fetch piling onto a slow machine.
         self._refreshing = False
-        self.status_var = tk.StringVar(value="Ready — open the ☰ menu.")
+        self.status_var = tk.StringVar(
+            value="Ready — pick a page in the sidebar.")
         if key_note:
             self.status_var.set(key_note)
 
-        # ---- Top bar (slim: actions live in the hamburger menu so a
-        # narrow split-screen window never chops them) ----
-        top = ctk.CTkFrame(self)
-        top.pack(fill="x", padx=10, pady=8)
-        SelectableMsg(top, text="Portfolio",
-                      font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
-                          side="left", padx=8)
-        self.date_lbl = SelectableMsg(
-            top, text="As of %s" % datetime.date.today().isoformat())
-        self.date_lbl.pack(side="left", padx=8)
-        ctk.CTkButton(top, text="☰", width=44,
-                      command=self.toggle_menu).pack(side="right", padx=4)
-        # Selectable so every status line copies — same rule as dialogs.
-        # Word-wrapped, never clipped: the bar keeps its slim single line
-        # for short messages and grows vertically when a long one needs a
-        # second line (split-screen included) — the full text stays
-        # visible at every width instead of clipping at the window edge.
-        self.status = SelectableMsg(top, textvariable=self.status_var,
-                                    text_color="orange")
-        self.status.pack(side="left", padx=8, fill="x", expand=True)
-        # Refresh progress: hidden unless a price fetch is running. The
-        # ticker count is known upfront, so this is determinate (k/N) —
-        # on a slow machine the bar, not silence, answers "is it stuck?".
-        self.refresh_bar = ctk.CTkProgressBar(top, width=120)
+        # ---- Sidebar shell (the tutorial's layout as-is) ----
+        # Root grid: sidebar fixed 200px at column 0, main view expands
+        # at column 1. Nav buttons live in a scrollable frame so ten
+        # entries never clip at short window heights; bottom holds the
+        # appearance + scaling menus and the Settings button.
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
+        self.title_font = ctk.CTkFont(size=TITLE_FONT_SIZE, weight="bold")
+        self.value_font = ctk.CTkFont(size=VALUE_FONT_SIZE, weight="bold")
+        self.sidebar = ctk.CTkFrame(self, width=SIDEBAR_WIDTH,
+                                    corner_radius=0)
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        ctk.CTkLabel(self.sidebar, text="Retirement Portfolio",
+                     font=self.value_font).pack(padx=MAIN_PAD, pady=(20, 4),
+                                                anchor="w")
+        ctk.CTkLabel(self.sidebar, text="All pages, one sidebar",
+                     text_color=CLR_SECONDARY).pack(padx=MAIN_PAD,
+                                                    pady=(0, 8), anchor="w")
+        self.nav_scroll = ctk.CTkScrollableFrame(
+            self.sidebar, fg_color="transparent")
+        self.nav_scroll.pack(fill="both", expand=True,
+                             padx=(10, 2), pady=(0, 8))
+        self.nav_buttons = {}
+        for name in NAV_PAGES:
+            btn = ctk.CTkButton(
+                self.nav_scroll, text=name, anchor="w", height=32,
+                fg_color="transparent",
+                text_color=("gray10", "gray90"),
+                hover_color=("gray75", "gray25"),
+                command=lambda n=name: self.show_page(n))
+            btn.pack(fill="x", padx=4, pady=2)
+            self.nav_buttons[name] = btn
+        ctk.CTkButton(self.sidebar, text="Settings", anchor="w",
+                      height=32, fg_color="transparent",
+                      text_color=("gray10", "gray90"),
+                      hover_color=("gray75", "gray25"),
+                      command=self.open_settings).pack(
+                          fill="x", padx=14, pady=(4, 2))
+        self.appearance_menu = ctk.CTkOptionMenu(
+            self.sidebar, height=32,
+            values=["System", "Light", "Dark"],
+            command=self.change_appearance_mode)
+        self.appearance_menu.pack(fill="x", padx=14, pady=2)
+        self.appearance_menu.set("Dark")
+        self.scaling_menu = ctk.CTkOptionMenu(
+            self.sidebar, height=32,
+            values=["80%", "90%", "100%", "110%", "120%"],
+            command=self.change_scaling)
+        self.scaling_menu.pack(fill="x", padx=14, pady=(2, 14))
+        self.scaling_menu.set("100%")
+        # ---- Main view (transparent, 20px padding) ----
+        self.main = ctk.CTkFrame(self, fg_color="transparent")
+        self.main.grid(row=0, column=1, sticky="nsew", padx=MAIN_PAD,
+                       pady=MAIN_PAD)
+        self.main.grid_columnconfigure(0, weight=1)
+        self.main.grid_rowconfigure(1, weight=1)
+        # Persistent header: page title (title size) + one gray subtitle
+        # line (FS_SMALL + CLR_SECONDARY) carrying the "As of <date>"
+        # date and the live status message. Actions (Overview's Refresh
+        # stocks + progress bar) fill the right box per page.
+        head = ctk.CTkFrame(self.main, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        head.grid_columnconfigure(0, weight=1)
+        hleft = ctk.CTkFrame(head, fg_color="transparent")
+        hleft.grid(row=0, column=0, sticky="w")
+        self.header_title = ctk.CTkLabel(
+            hleft, text="Overview", font=self.title_font)
+        self.header_title.pack(anchor="w")
+        self.header_sub = SelectableMsg(hleft, text="",
+                                        text_color=CLR_SECONDARY)
+        self.header_sub.pack(anchor="w", fill="x")
+        self.header_actions = ctk.CTkFrame(head, fg_color="transparent")
+        self.header_actions.grid(row=0, column=1, sticky="e")
+        self.page = ctk.CTkFrame(self.main, fg_color="transparent")
+        self.page.grid(row=1, column=0, sticky="nsew")
+        self.refresh_bar = ctk.CTkProgressBar(self.header_actions,
+                                              width=120)
         self.refresh_bar.set(0)
-        self.menu_win = None
         self.bind_all("<MouseWheel>", self._wheel_scroll, add="+")
         # Standard Windows copy: click any text to focus it, Ctrl+C copies.
         # Entries/text boxes keep native selection copy; labels copy their
@@ -486,33 +613,11 @@ class App(ctk.CTk):
         self.bind_all("<Button-1>", self._focus_for_copy, add="+")
         self.bind_all("<Control-c>", self._copy_hotkey, add="+")
 
-        # ---- Tabs ----
-        # Top level: Dashboard, Diversification, Tax Harvest, Data Entry,
-        # plus Utilities when at least one plugin is enabled (hidden
-        # otherwise — see _sync_utility_tabs).
-        # Dashboard holds Overview (landing), Accounts, Holdings, Liquidity,
-        # Tax implications. Data Entry holds Inputs, Template, Danger Zone;
-        # Settings lives under the hamburger menu (no Profile sub-tab).
-        self.tabs = ctk.CTkTabview(self)
-        self.tabs.pack(fill="both", expand=True, padx=10, pady=4)
-        for name in ("Dashboard", "Diversification", "Tax Harvest",
-                     "Data Entry"):
-            self.tabs.add(name)
-        self.dash_tabs = ctk.CTkTabview(self.tabs.tab("Dashboard"))
-        self.dash_tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        for name in ("Overview", "Accounts", "Holdings", "Liquidity",
-                     "Tax implications"):
-            self.dash_tabs.add(name)
-        self.data_tabs = ctk.CTkTabview(self.tabs.tab("Data Entry"))
-        self.data_tabs.pack(fill="both", expand=True, padx=4, pady=4)
-        for name in ("Inputs", "Template", "Danger Zone"):
-            self.data_tabs.add(name)
-        self.tabs.set("Dashboard")
-        self.dash_tabs.set("Overview")
-        self.frames = {}
-
+        self.current_page = None
+        self.status_var.trace_add(
+            "write", lambda *a: self._refresh_subtitle())
         self.recompute()
-        self.build_all()
+        self.show_page("Overview")
         self.refresh_data_window()
 
     # ---- data ----
@@ -618,72 +723,104 @@ class App(ctk.CTk):
             st.setdefault(key, val)
         return st
 
-    def _sync_utility_tabs(self):
-        """Utilities tab reflects the enabled set: hidden when none is
-        enabled, one sub-tab per enabled plugin otherwise. Sub-tabs are
-        rebuilt only when the enabled set changes (so typing in a plugin
-        survives background refreshes); steady-state data updates go
-        through each plugin's optional on_data_changed hook."""
+    def build_utilities(self):
+        """Utilities page (always present): a CTkTabview whose first tab
+        lists every discovered plugin with its enable control, then one
+        sub-tab per enabled plugin. Plugin sub-tabs are rebuilt only
+        when the enabled set changes (so typing in a plugin survives
+        background refreshes); steady-state data updates go through each
+        plugin's optional on_data_changed hook."""
         enabled = [(pid, mod) for pid, mod in self.plugins.items()
                    if self._plugin_enabled(pid)]
         pids = tuple(pid for pid, _ in enabled)
-        if not enabled:
-            if self._utilities_present:
-                try:
-                    self.tabs.delete("Utilities")
-                except (ValueError, tk.TclError):
-                    pass
-                self._utilities_present = False
-            self.util_tabs = None
-            self._utility_pids = pids
-            return
-        if not self._utilities_present:
-            try:
-                self.tabs.add("Utilities")
-            except ValueError:
-                pass  # already there; just adopt it
-            self._utilities_present = True
-            self.util_tabs = None
-        if self.util_tabs is None or pids != self._utility_pids:
-            if self.util_tabs is not None:
-                try:
-                    self.util_tabs.destroy()
-                except tk.TclError:
-                    pass
-            self.util_tabs = ctk.CTkTabview(self.tabs.tab("Utilities"))
-            self.util_tabs.pack(fill="both", expand=True, padx=4, pady=4)
+        if (self.util_tabs is not None and self.util_tabs.winfo_exists()
+                and pids == self._utility_pids
+                and self.current_page == "Utilities"
+                and list(self.page.winfo_children()) == [self.util_tabs]):
             for pid, mod in enabled:
+                hook = getattr(mod, "on_data_changed", None)
+                if not callable(hook):
+                    continue
                 try:
-                    self.util_tabs.add(mod.PLUGIN_TITLE)
-                except ValueError:
-                    pass  # duplicate title; adopt the existing sub-tab
-                frame = self.util_tabs.tab(mod.PLUGIN_TITLE)
-                for w in frame.winfo_children():
-                    w.destroy()
-                try:
-                    mod.build(self, frame)
-                except Exception as e:  # noqa: BLE001 - one plugin's
-                    # failure shows in its own sub-tab; the rest keeps
-                    # working.
-                    SelectableMsg(
-                        frame,
-                        text="Plugin %s failed: %s — the rest of the "
-                             "app is unaffected."
-                        % (mod.PLUGIN_TITLE, type(e).__name__),
-                        text_color="orange",
-                        anchor="w").pack(anchor="w", padx=8, pady=8,
-                                         fill="x")
-            self._utility_pids = pids
+                    hook(self)
+                except Exception:  # noqa: BLE001 - same rule: a plugin's
+                    # refresh failure must not break the core rebuild.
+                    pass
             return
+        f = self._clear_page()
+        self.util_tabs = ctk.CTkTabview(f)
+        self.util_tabs.pack(fill="both", expand=True, padx=4, pady=4)
+        try:
+            self.util_tabs.add("Plugins")
+        except ValueError:
+            pass  # duplicate title; adopt the existing sub-tab
+        frame = self.util_tabs.tab("Plugins")
+        for w in frame.winfo_children():
+            w.destroy()
+        SelectableMsg(
+            frame,
+            text="Utilities extend the app without changing its core. "
+                 "Turn one on below and its tab appears here.").pack(
+                     anchor="w", padx=8, pady=(8, 2), fill="x")
+        self._util_vars = {}
+        for pid, mod in self.plugins.items():
+            row = ctk.CTkFrame(frame, fg_color="transparent")
+            row.pack(fill="x", padx=8, pady=2)
+            var = tk.BooleanVar(value=self._plugin_enabled(pid))
+            self._util_vars[pid] = var
+            ctk.CTkCheckBox(row, text=mod.PLUGIN_TITLE,
+                            variable=var).pack(side="left")
+            SelectableMsg(row, text=getattr(mod, "PLUGIN_DESC", ""),
+                          text_color=CLR_SECONDARY,
+                          anchor="w").pack(side="left", padx=8)
+        ctk.CTkButton(frame, text="Save",
+                      command=self._save_utility_enabled).pack(
+                          padx=8, pady=(6, 8), anchor="w")
         for pid, mod in enabled:
-            hook = getattr(mod, "on_data_changed", None)
-            if not callable(hook):
-                continue
             try:
-                hook(self)
-            except Exception:  # noqa: BLE001 - same rule: a plugin's
-                # refresh failure must not break the core rebuild.
-                pass
+                self.util_tabs.add(mod.PLUGIN_TITLE)
+            except ValueError:
+                pass  # duplicate title; adopt the existing sub-tab
+            sub = self.util_tabs.tab(mod.PLUGIN_TITLE)
+            for w in sub.winfo_children():
+                w.destroy()
+            try:
+                mod.build(self, sub)
+            except Exception as e:  # noqa: BLE001 - one plugin's
+                # failure shows in its own sub-tab; the rest keeps
+                # working.
+                SelectableMsg(
+                    sub,
+                    text="Plugin %s failed: %s — the rest of the "
+                         "app is unaffected."
+                    % (mod.PLUGIN_TITLE, type(e).__name__),
+                    text_color="orange",
+                    anchor="w").pack(anchor="w", padx=8, pady=8,
+                                     fill="x")
+        self._utility_pids = pids
+
+    def _save_utility_enabled(self):
+        # Activation moved here from Settings: apply the checkboxes,
+        # persist the profile, recompute, rebuild the Utilities page so
+        # the new sub-tabs appear. Typing elsewhere is preserved —
+        # only this page rebuilds. Enable/disable transitions fire each
+        # plugin's on_enabled hook (same immediate effect as the old
+        # Settings checkbox, e.g. Medi-Cal's profile write-back).
+        plugins = self.profile.setdefault("plugins", {})
+        for pid, var in (getattr(self, "_util_vars", None) or {}).items():
+            mod = self.plugins.get(pid)
+            st = plugins.setdefault(pid, {})
+            new_en = bool(var.get())
+            old_en = bool(st.get("enabled", False))
+            st["enabled"] = new_en
+            if mod is not None and new_en != old_en:
+                hook = getattr(mod, "on_enabled", None)
+                if callable(hook):
+                    hook(self, new_en)
+        pc.save_profile(PROFILE_JSON, self.profile)
+        self.recompute()
+        self.build_utilities()
+        self.status_var.set("Utilities saved.")
 
     def _snap_scrolls(self, names):
         """Fractions for the named scroll regions (registry holds the live
@@ -969,7 +1106,7 @@ class App(ctk.CTk):
                                             or q.get("mcap") is not None):
                     self.watch[t] = q
         self.recompute()
-        self.build_all()
+        self.refresh_current_page()
         try:
             self._cov_refresh_chrome()
         except (tk.TclError, ValueError, AttributeError):
@@ -991,70 +1128,110 @@ class App(ctk.CTk):
             self.status_var.set(self.status_var.get()
                                 + " Watchlist: %s."
                                 % "; ".join(watch_errors[:2]))
+        # Refresh always autos: log today's closes into the drift log
+        # (upsert by date); a missing standard total skips the write
+        # and says so in the status line.
+        self.auto_log_close()
 
-    def log_close(self):
-        d = self.data["drift"]
-        if d["standard_total"] is None:
-            self.status_var.set("Cannot log close — drift needs live "
-                                "BTC/GLD/VTI/MSTR prices.")
+    # ---- sidebar pages ----
+    def show_page(self, name):
+        """Sidebar navigation (tutorial's selection pattern): accent the
+        chosen nav button, set the header title, fill the right action
+        box (Overview gets Refresh stocks + the progress bar), and run
+        that page's builders. One path to every page — the tab bars and
+        hamburger menu are gone."""
+        if name not in NAV_PAGES:
             return
-        msg = pc.append_close(DRIFT_LOG, self.data["liquid"], self.home_value,
-                              d["today_total"], d["standard_total"])
-        self.status_var.set(msg)
-        self.build_diversification()
+        accent = ctk.ThemeManager.theme["CTkButton"]["fg_color"]
+        for label, btn in self.nav_buttons.items():
+            if label == name:
+                btn.configure(fg_color=accent,
+                              text_color=ctk.ThemeManager.theme[
+                                  "CTkButton"]["text_color"])
+            else:
+                btn.configure(fg_color="transparent",
+                              text_color=("gray10", "gray90"))
+        self.current_page = name
+        self.header_title.configure(text=name)
+        for w in self.header_actions.winfo_children():
+            # The progress bar persists across pages (Overview re-packs
+            # it); everything else in the action box is per-page.
+            if w is not self.refresh_bar:
+                w.destroy()
+        try:
+            self.refresh_bar.pack_forget()
+        except tk.TclError:
+            pass
+        self._refresh_subtitle()
+        if name == "Overview":
+            ctk.CTkButton(self.header_actions, text="Refresh stocks",
+                          command=self.refresh_async).pack(
+                              side="left", padx=4)
+            self.refresh_bar.pack(side="left", padx=4)
+        builder = self._page_builder(name)
+        if builder is not None:
+            builder()
 
-    # ---- hamburger menu: exactly three items ----
-    def toggle_menu(self):
-        """Open/close the ☰ popup: Refresh stocks, Refresh home estimates,
-        Log, Settings. Data Entry is a tab now — no window opens from here."""
-        if self.menu_win is not None and self.menu_win.winfo_exists():
-            self._close_menu()
+    def _page_builder(self, name):
+        return {"Overview": self.build_overview,
+                "Accounts": self.build_accounts,
+                "Holdings": self.build_holdings,
+                "Liquidity": self.build_liquidity,
+                "Tax": self.build_tax,
+                "Diversification": self.build_diversification,
+                "Inputs": self.build_data_coverage,
+                "Template": self.build_data_template,
+                "Danger Zone": self.build_data_danger,
+                "Utilities": self.build_utilities}.get(name)
+
+    def refresh_current_page(self):
+        """Rebuild the current page after data changed — the sidebar
+        equivalent of the old rebuild-all. Data Entry pages refresh
+        explicitly at their own call sites (structural rebuild vs
+        in-place repaint), so they are skipped here."""
+        if self.current_page in ("Inputs", "Template", "Danger Zone"):
             return
-        win = ctk.CTkToplevel(self)
-        win.title("Actions")
-        win.transient(self)
-        win.resizable(False, False)
-        win.attributes("-topmost", True)
-        win.geometry("+%d+%d" % (self.winfo_x() + self.winfo_width() - 320,
-                                 self.winfo_y() + 60))
-        ctk.CTkButton(win, text="Refresh stocks",
-                      command=self.refresh_from_menu).pack(
-                          padx=12, pady=(12, 4), fill="x")
-        ctk.CTkButton(win, text="Refresh home estimates",
-                      command=self.home_from_menu).pack(
-                          padx=12, pady=4, fill="x")
-        ctk.CTkButton(win, text="Log",
-                      command=self.log_from_menu).pack(
-                          padx=12, pady=4, fill="x")
-        ctk.CTkButton(win, text="Settings",
-                      command=self.settings_from_menu).pack(
-                          padx=12, pady=(4, 12), fill="x")
-        self.menu_win = win
-        # CustomTkinter withdraws a new Toplevel on Windows while theming
-        # its titlebar; re-show ours once that settles.
-        win.after(50, self._show_menu)
+        builder = self._page_builder(self.current_page)
+        if builder is not None:
+            builder()
 
-    def _show_menu(self):
-        if self.menu_win is not None and self.menu_win.winfo_exists():
-            self.menu_win.deiconify()
-            self.menu_win.lift()
+    def _refresh_subtitle(self):
+        # One gray line: the "As of <date>" date and the live status.
+        if getattr(self, "header_sub", None) is None:
+            return
+        try:
+            self.header_sub.configure(
+                text="As of %s · %s" % (datetime.date.today().isoformat(),
+                                        self.status_var.get()))
+        except tk.TclError:
+            pass
 
-    def _close_menu(self):
-        if self.menu_win is not None and self.menu_win.winfo_exists():
-            self.menu_win.destroy()
-        self.menu_win = None
+    def change_appearance_mode(self, mode):
+        # Tutorial's handler, plus a page rebuild so the theme-aware
+        # message widgets (tk.Text needs a concrete color) pick up the
+        # new mode's resolved colors.
+        ctk.set_appearance_mode(mode)
+        self.refresh_current_page()
 
-    def refresh_from_menu(self):
-        self._close_menu()
-        self.refresh_async()
+    def change_scaling(self, scaling):
+        # Tutorial's handler as-is.
+        ctk.set_widget_scaling(int(scaling.replace("%", "")) / 100)
 
-    def log_from_menu(self):
-        self._close_menu()
-        self.log_close()
-
-    def settings_from_menu(self):
-        self._close_menu()
-        self.open_settings()
+    def auto_log_close(self):
+        """Log today's closes into the drift log (upsert by date) after a
+        refresh — refresh always autos. A missing computed drift
+        standard total shows the status message and writes nothing."""
+        standard = self.data.get("drift", {}).get("standard_total")
+        if standard is None:
+            self.status_var.set("Cannot log close — the computed drift "
+                                "standard total is missing (no baseline or "
+                                "prices yet).")
+            return
+        msg = pc.append_close(DRIFT_LOG, self.data.get("liquid"),
+                              self.home_value,
+                              self.data.get("drift", {}).get("today_total"),
+                              standard)
+        self.status_var.set(self.status_var.get() + " " + msg)
 
     # ---- home value: Properties list + RentCast auto-estimates ----
     @staticmethod
@@ -1129,206 +1306,26 @@ class App(ctk.CTk):
                  (p.get("address") or "").strip() or "(no address)")
                 for i, p in enumerate(self._properties())]
 
-    def home_from_menu(self):
-        self._close_menu()
-        win = ctk.CTkToplevel(self)
-        win.title("Refresh home estimates")
-        win.transient(self)
-        win.resizable(False, False)
-        SelectableMsg(win, text="Latest home value estimate:").pack(
-            padx=12, pady=(12, 2), anchor="w", fill="x")
-        # Fetches per property and SHOWS the pulled value + source +
-        # date — it never silently replaces anything. The user accepts the
-        # pulled value or overwrites the applied value manually (e.g. after
-        # checking Zillow or Redfin in the browser), then Save applies it.
-        # RentCast is called ONLY here — never in the background, never on
-        # app start.
-        props = self._properties()
-        if not props:
-            SelectableMsg(
-                win, text="No properties yet — add one in Settings "
-                          "(Properties), then Refresh.",
-                anchor="w").pack(padx=12, pady=12, anchor="w", fill="x")
-            ctk.CTkButton(win, text="Close",
-                          command=win.destroy).pack(padx=12, pady=(0, 12),
-                                                   fill="x")
-            win.after(50, lambda: (win.deiconify(), win.lift())
-                      if win.winfo_exists() else None)
-            return
-        key = (self.profile.get("rentcast_key") or "").strip()
-        rows = []
-        for p in props:
-            box = ctk.CTkFrame(win, fg_color="transparent")
-            box.pack(fill="x", padx=12, pady=4)
-            SelectableMsg(
-                box, text=(p.get("address") or "(no address)").strip() or
-                "(no address)",
-                font=ctk.CTkFont(weight="bold"),
-                anchor="w").pack(anchor="w", fill="x")
-            line = ctk.CTkFrame(box, fg_color="transparent")
-            line.pack(fill="x", pady=2)
-            ctk.CTkLabel(line, text="Applied $").pack(side="left")
-            applied = ctk.CTkEntry(line, width=140)
-            try:
-                cur = float(p.get("applied_value") or 0)
-                if cur:
-                    applied.insert(0, str(p.get("applied_value")))
-            except (TypeError, ValueError):
-                pass
-            applied.pack(side="left", padx=4)
-            use_btn = ctk.CTkButton(line, text="Use estimate", width=110,
-                                    state="disabled")
-            use_btn.pack(side="left", padx=4)
-            pulled = SelectableMsg(box, text="Fetching…",
-                                     text_color=CLR_SECONDARY)
-            pulled.pack(anchor="w")
-            rows.append({"prop": p, "applied": applied,
-                         "use_btn": use_btn, "pulled": pulled,
-                         "result": None})
-        quota_lbl = SelectableMsg(win, text="",
-                                    text_color=CLR_SECONDARY)
-        quota_lbl.pack(padx=12, anchor="w")
-        msg = SelectableMsg(win, text="", text_color="orange")
-        msg.pack(padx=12, anchor="w")
-
-        def finish(result_list):
-            if not win.winfo_exists():
-                return
-            quota = ""
-            for i, res in enumerate(result_list):
-                rows[i]["result"] = res
-                if res["error"] and res["price"] is None:
-                    rows[i]["pulled"].configure(text=res["error"])
-                else:
-                    tail = (" — %s" % res["error"]) if res["error"] else ""
-                    rows[i]["pulled"].configure(
-                        text="RentCast: %s (as of %s)%s" % (
-                            money(res["price"]), res["asof"], tail))
-                    rows[i]["use_btn"].configure(
-                        state="normal",
-                        command=lambda r=rows[i]: (
-                            r["applied"].delete(0, "end"),
-                            r["applied"].insert(
-                                0, str(r["result"]["price"]))))
-                if res.get("quota"):
-                    quota = res["quota"]
-            if quota:
-                quota_lbl.configure(text=quota)
-
-        if not key:
-            for r in rows:
-                last = r["prop"].get("last_estimate")
-                if last:
-                    r["pulled"].configure(
-                        text="Last: %s (%s, %s). Add your free RentCast "
-                             "key in Settings, then Refresh for a live "
-                             "estimate."
-                             % (money(last), r["prop"].get("last_source")
-                                or "?", r["prop"].get("last_asof") or "?"))
-                else:
-                    r["pulled"].configure(
-                        text="No RentCast key — add your free Developer key "
-                             "in Settings, then Refresh.")
-            # The no-key state offers a direct path: no closing the popup,
-            # opening the menu, and opening Settings by hand.
-            ctk.CTkButton(win, text="Open Settings", width=150,
-                          command=lambda: (win.destroy(),
-                                           self.open_settings())).pack(
-                                               padx=12, pady=(6, 2),
-                                               anchor="w")
-        else:
-            snapshots = [(p.get("address") or "") for p in props]
-            box_q = queue.Queue()
-
-            def work():
-                box_q.put([pc.fetch_rentcast_estimate(a, key)
-                           for a in snapshots])
-
-            threading.Thread(target=work, daemon=True).start()
-
-            def poll():
-                if not win.winfo_exists():
-                    return
-                try:
-                    finish(box_q.get_nowait())
-                except queue.Empty:
-                    win.after(150, poll)
-
-            win.after(150, poll)
-
-        def save():
-            new_props = []
-            for r in rows:
-                raw = r["applied"].get().strip().replace(",", "").replace(
-                    "$", "")
-                try:
-                    applied = float(raw or 0)
-                except ValueError:
-                    msg.configure(text="Applied values must be numbers — "
-                                       "nothing saved.")
-                    return
-                prop = dict(r["prop"])
-                prop["applied_value"] = applied
-                if r["result"] and r["result"]["price"] is not None:
-                    prop["last_estimate"] = r["result"]["price"]
-                    prop["last_source"] = r["result"]["source"]
-                    prop["last_asof"] = r["result"]["asof"]
-                new_props.append(prop)
-            self._busy("Applying home values…")
-            try:
-                self.profile["properties"] = new_props
-                pc.save_profile(PROFILE_JSON, self.profile)
-                self._sync_home()
-                self.recompute()
-                self.build_all()
-                self.refresh_data_window()
-            finally:
-                self._idle()
-            win.destroy()
-            self.status_var.set("Home updated to %s."
-                                % money(self.home_value))
-
-        bar = ctk.CTkFrame(win, fg_color="transparent")
-        bar.pack(fill="x", padx=12, pady=(4, 12))
-        ctk.CTkButton(bar, text="Save applies", width=130,
-                      command=save).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(bar, text="Cancel", width=110,
-                      command=win.destroy).pack(side="left")
-        win.after(50, lambda: (win.deiconify(), win.lift())
-                  if win.winfo_exists() else None)
-
     # ---- builders ----
-    def _clear(self, tab):
-        frame = self.tabs.tab(tab)
-        for w in frame.winfo_children():
+    def _clear_page(self):
+        # Every page builds into the sidebar shell's single content frame.
+        for w in self.page.winfo_children():
             w.destroy()
-        return frame
+        return self.page
+
+    def _clear(self, tab):
+        # Legacy tab name ignored: all pages share the one content frame.
+        return self._clear_page()
 
     def _clear_dash(self, tab):
-        frame = self.dash_tabs.tab(tab)
-        for w in frame.winfo_children():
-            w.destroy()
-        return frame
+        # Legacy tab name ignored: all pages share the one content frame.
+        return self._clear_page()
 
     def build_all(self):
-        self._keep_scrolls(self._build_all_inner,
-                           ("overview", "accounts", "holdings",
-                            "liquidity", "taximplic", "diversification",
-                            "tax"))
-
-    def _build_all_inner(self):
-        # Main views only — Data Entry refresh is explicit at each call
-        # site (structural rebuild vs in-place repaint, fix 5).
-        self.build_overview()
-        self.build_accounts()
-        self.build_holdings()
-        self.build_liquidity()
-        self.build_taximplic()
-        self.build_diversification()
-        self.build_tax()
-        # Plugin utilities last: the tab reflects the enabled set, and
-        # enabled plugins get their data-changed hook.
-        self._sync_utility_tabs()
+        # Legacy entry point: rebuild the current page (the sidebar shows
+        # one page at a time; Data Entry pages refresh explicitly at their
+        # own call sites — structural rebuild vs in-place repaint).
+        self.refresh_current_page()
 
     def _wheel_scroll(self, event):
         # Global wheel: scroll whichever CTkScrollableFrame sits under the
@@ -1470,7 +1467,10 @@ class App(ctk.CTk):
             win = tk.Toplevel(self)
             win.wm_overrideredirect(True)
             win.wm_geometry("+%d+%d" % (x, y))
-            tk.Label(win, text=text, bg="#3A3A3A", fg="#EDEDED",
+            # Tooltips stay dark in both modes (conventional); the text
+            # resolves from the theme pair's dark half — no literal.
+            tk.Label(win, text=text, bg="#3A3A3A",
+                     fg=_to_hex(_theme_for_mode(TEXT_COLOR, False)),
                      relief="solid", borderwidth=1, wraplength=320,
                      justify="left").pack()
             tip["win"] = win
@@ -1585,8 +1585,7 @@ class App(ctk.CTk):
         return canvas
 
     def _goto_template(self):
-        self.tabs.set("Data Entry")
-        self.data_tabs.set("Template")
+        self.show_page("Template")
 
     def build_overview(self):
         self._keep_scrolls(self._build_overview_inner, ("overview",))
@@ -2491,11 +2490,13 @@ class App(ctk.CTk):
         "Cash": "N/A — spendable, no investment tax treatment.",
     }
 
-    def build_taximplic(self):
-        f = self._clear_dash("Tax implications")
-        # One scroll region for the view (both tables full-height inside).
+    def build_tax(self):
+        f = self._clear("Tax")
+        # Merged page (Item 8): the tax-implications meaning tables sit
+        # above the Tax Loss Harvesting content — one scroll region, both
+        # Table helpers, same widths as everywhere.
         body = ctk.CTkScrollableFrame(f)
-        self._scroll_keep["taximplic"] = body
+        self._scroll_keep["tax"] = body
         body.pack(fill="both", expand=True)
         self._selectable_note(
             body, "What each account type means for tax and withdrawals "
@@ -2512,6 +2513,10 @@ class App(ctk.CTk):
         Table(body, ["Account", "Type"],
               [[a, seen[a]] for a in sorted(seen)]
               ).pack(fill="x", padx=6, pady=6)
+        SelectableMsg(body, text="Tax Loss Harvesting",
+                      font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
+                          padx=6, pady=(6, 0), anchor="w", fill="x")
+        self._build_tax_harvest(body)
 
     def build_diversification(self):
         from matplotlib.figure import Figure
@@ -2655,15 +2660,9 @@ class App(ctk.CTk):
                 body, "No drift data yet — press Log after a close to "
                       "start the history.", padx=6, pady=6, fill="x")
 
-    def build_tax(self):
-        f = self._clear("Tax Harvest")
-        SelectableMsg(f, text="Tax Loss Harvesting",
-                      font=ctk.CTkFont(size=FS_HEAD, weight="bold")).pack(
-                          padx=6, pady=(6, 0), anchor="w", fill="x")
-        # One scroll region for the view: all tables full-height inside.
-        body = ctk.CTkScrollableFrame(f)
-        self._scroll_keep["tax"] = body
-        body.pack(fill="both", expand=True)
+    def _build_tax_harvest(self, body):
+        # Tax Loss Harvesting content: folds into the merged Tax page
+        # below the meaning tables (same scroll region, same body).
         year = datetime.date.today().year
         prices = self.prices
         rows = []
@@ -2760,7 +2759,7 @@ class App(ctk.CTk):
     # (Charts merged into build_diversification; Rebalance merged too.)
 
 
-    # ---- Data Entry tab (Inputs / Template / Danger Zone) ----
+    # ---- Data Entry pages (Inputs / Template / Danger Zone) ----
     def _ensure_cov_state(self):
         if getattr(self, "cov_lots", None) is None:
             self.cov_lots = []
@@ -2777,20 +2776,18 @@ class App(ctk.CTk):
                 self.cov_guide = "done"
 
     def refresh_data_window(self):
-        self._keep_scrolls(self._refresh_data_window_inner,
-                           ("coverage", "template_guide"))
-
-    def _refresh_data_window_inner(self):
+        # Coverage state always initializes; the Data Entry page rebuilds
+        # only when it is the current page (one page shows at a time —
+        # never rebuild a background page over the visible one).
         self._ensure_cov_state()
-        self.build_data_coverage()
-        self.build_data_template()
-        self.build_data_danger()
+        if self.current_page in ("Inputs", "Template", "Danger Zone"):
+            builder = self._page_builder(self.current_page)
+            if builder is not None:
+                builder()
 
     def _clear_data_tab(self, name):
-        frame = self.data_tabs.tab(name)
-        for w in frame.winfo_children():
-            w.destroy()
-        return frame
+        # Legacy tab name ignored: all pages share the one content frame.
+        return self._clear_page()
 
     def _cov_save_label(self, n):
         if n == 0:
@@ -2881,7 +2878,7 @@ class App(ctk.CTk):
                           width=240,
                           command=self._cov_add_account).pack(padx=8, pady=8)
             SelectableMsg(
-                f, text="Or upload a filled template in the Template sub-tab.",
+                f, text="Or upload a filled template in the Template page.",
                 anchor="w").pack(padx=8, pady=4, anchor="w", fill="x")
             self._cov_refresh_chrome()
             return
@@ -2950,9 +2947,9 @@ class App(ctk.CTk):
                 [("Asset", 96), ("Shares", 62), ("Cost $", 62),
                  ("Acquired", 96), ("Sold", 96), ("Sale $", 62),
                  ("", 190), ("", 18), ("", 48), ("", 38), ("", 30)]):
-            ctk.CTkLabel(hdr, text=txt, width=w,
+            ctk.CTkLabel(hdr, text=txt, width=w, anchor="w",
                          font=ctk.CTkFont(weight="bold")).grid(
-                             row=0, column=col, padx=2)
+                             row=0, column=col, padx=2, sticky="w")
         for st, title in (("Open", None), ("Closed", "Closed")):
             sub = [r for r in rows if pc.lot_status(r) == st]
             if st == "Closed" and sub:
@@ -3536,6 +3533,7 @@ class App(ctk.CTk):
         locked = bool(row.get("_locked", True))
         entry_fg = W.get("entry_fg_def")
         entry_tx = W.get("entry_tx_def")
+        light = _mode_is_light(W.get("frame") or self)
         for key in ("bank", "shares", "cost", "acquired", "sold_date",
                     "sale_price", "account_new", "asset_new"):
             widget = W.get(key)
@@ -3557,7 +3555,7 @@ class App(ctk.CTk):
                         widget.configure(text_color=CLR_SECONDARY)
                 else:
                     widget.configure(
-                        fg_color=CELL_EMPTY_BG if empty else "white",
+                        fg_color=_cell_empty_bg(light) if empty else "white",
                         text_color="black")
             except (tk.TclError, ValueError):
                 pass
@@ -4031,15 +4029,13 @@ class App(ctk.CTk):
             # dirty-marked — Save lives here, not in the Accounts tab.
             self.cov_filter = acct
             self.cov_guide = acct
-            self.tabs.set("Data Entry")
-            self.data_tabs.set("Inputs")
-            self.build_data_coverage()
+            self.show_page("Inputs")
             self._cov_scroll_to_row(row["_rid"])
             extra = "" if (is_shell or atype != "Taxable") else \
                 " — fill cost/dates first"
             self.status_var.set(
-                "Account %s will be added when you press Save in "
-                "Data Entry → Inputs%s." % (acct, extra))
+                "Account %s will be added when you press Save on the "
+                "Inputs page%s." % (acct, extra))
 
         ctk.CTkButton(body, text="Create account", command=save).pack(
             anchor="w", padx=4, pady=8)
@@ -4124,8 +4120,9 @@ class App(ctk.CTk):
             if state["view"] == "days":
                 for c, wd in enumerate(["Mo", "Tu", "We", "Th", "Fr",
                                         "Sa", "Su"]):
-                    ctk.CTkLabel(body, text=wd, width=36).grid(row=0,
-                                                              column=c)
+                    ctk.CTkLabel(body, text=wd, width=36,
+                                 anchor="w").grid(row=0, column=c,
+                                                  sticky="w")
                 r = 1
                 for week in calmod.monthcalendar(state["y"], state["m"]):
                     c = 0
@@ -4300,8 +4297,7 @@ class App(ctk.CTk):
         if getattr(self, "cov_lots", None) is not None and self._cov_counts():
             self.status_var.set(
                 "Save or discard Inputs edits first.")
-            self.tabs.set("Data Entry")
-            self.data_tabs.set("Inputs")
+            self.show_page("Inputs")
             return
         self.lots_changed_externally("Account type updated for %s." % account)
 
@@ -5087,34 +5083,13 @@ class App(ctk.CTk):
                                    "MAGI section N/A when on)",
                         variable=employer_var).pack(anchor="w", padx=4,
                                                     pady=(8, 2))
-        # ---- Utilities: one row per discovered plugin. Checked = enabled.
-        # Enabling the first plugin makes the Utilities tab appear;
-        # disabling the last one hides it again (the tab bar rebuilds on
-        # save, via build_all → _sync_utility_tabs).
-        SelectableMsg(body, text="Utilities",
-                      font=ctk.CTkFont(weight="bold")).pack(
-                          anchor="w", padx=4, pady=(10, 0), fill="x")
-        plugin_vars = {}
-        if not self.plugins:
-            SelectableMsg(
-                body, text="No utilities installed.",
-                text_color=CLR_SECONDARY).pack(anchor="w", padx=4, pady=2,
-                                               fill="x")
-        for pid, mod in self.plugins.items():
-            var = tk.BooleanVar(value=self._plugin_enabled(pid))
-            plugin_vars[pid] = var
-            ctk.CTkCheckBox(body, text=mod.PLUGIN_TITLE,
-                            variable=var).pack(anchor="w", padx=4,
-                                                pady=(6, 0))
-            SelectableMsg(body, text=mod.PLUGIN_DESC,
-                          anchor="w",
-                          text_color=CLR_SECONDARY).pack(
-                              anchor="w", padx=28, pady=(0, 2), fill="x")
+        # Utilities moved out: plugin activation lives on the
+        # always-present Utilities page now, not in Settings.
         # ---- Properties: addresses live here; the RentCast key too.
-        # Refresh (hamburger menu) pulls each estimate and SHOWS it —
-        # nothing is replaced until the user accepts it or types a value
-        # and presses Save settings. Redfin/Zillow enter through the
-        # manual applied value (check in the browser, type the number).
+        # The applied value is what flows into Holdings — check
+        # Zillow/Redfin in the browser and type the number, then Save
+        # settings. (The in-app fetch action is removed; the key stays
+        # stored for a future fetch path.)
         SelectableMsg(body, text="Properties",
                       font=ctk.CTkFont(weight="bold")).pack(
                           anchor="w", padx=4, pady=(10, 0), fill="x")
@@ -5175,11 +5150,10 @@ class App(ctk.CTk):
         key_ent.insert(0, self.profile.get("rentcast_key") or "")
         key_ent.pack(anchor="w", padx=4, pady=2)
         self._selectable_note(
-            body, "Refresh home estimates (hamburger menu) pulls the "
-                  "RentCast estimate per property and shows it next to "
-                  "the applied value — accepting or typing a value and "
-                  "saving is what applies it. No key: Refresh shows a "
-                  "hint, nothing breaks.",
+            body, "The applied value is what flows into Holdings — "
+                  "check Zillow or Redfin in the browser, type the number, "
+                  "and save. Estimates are manual now; the RentCast key "
+                  "stays stored for a future fetch path.",
             padx=4, pady=4, fill="x")
         note = self._selectable_note(body, self._settings_summary_text(),
                                      padx=4, pady=4, fill="x")
@@ -5256,20 +5230,9 @@ class App(ctk.CTk):
                          "field above. Nothing saved.")
                 return
             self.profile["rentcast_key"] = key
-            # Plugin enable/disable transitions run here, before the
-            # profile is persisted, so a plugin's write-back (e.g. Medi-Cal
-            # plugging its projected "other" into other_annual_income)
-            # lands in the same save + recompute as everything else.
-            plugins = self.profile.setdefault("plugins", {})
-            for pid, mod in self.plugins.items():
-                st = plugins.setdefault(pid, {})
-                new_en = bool(plugin_vars[pid].get())
-                old_en = bool(st.get("enabled", False))
-                st["enabled"] = new_en
-                if new_en != old_en:
-                    hook = getattr(mod, "on_enabled", None)
-                    if callable(hook):
-                        hook(self, new_en)
+            # Plugin enable/disable transitions run on the Utilities page
+            # now (their write-back lands in that page's own save +
+            # recompute), not in Settings.
             self._sync_home()
             self.commit_profile("Settings saved.")
             win.destroy()
